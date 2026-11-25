@@ -8,8 +8,7 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- SheetJS (Excel/CSV 読み書き用) -->
   <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
-  <!-- html5-qrcode (iOS/Android共通バーコードスキャン用) -->
-  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <!-- バーコード読み取りは、Androidは端末内蔵の BarcodeDetector、iPhoneは ZXing-C++（WebAssembly）を使用（必要時に読み込み） -->
   <!-- Google Fonts: Inter & Noto Sans JP -->
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;700;800&family=Noto+Sans+JP:wght@400;500;700;900&display=swap" rel="stylesheet">
   <style>
@@ -18,15 +17,8 @@
       -webkit-tap-highlight-color: transparent;
       overscroll-behavior-y: contain;
     }
-    /* カメラプレビューの余分な枠線を調整 */
-    #qr-reader {
-      border: none !important;
-      width: 100% !important;
-    }
-    #qr-reader video {
-      object-fit: cover !important;
-      border-radius: 0.75rem;
-    }
+    /* カメラ映像（デジタルズーム時は中央から拡大） */
+    #camVideo { transform-origin: center center; }
     /* 画面フラッシュ演出（iPhoneなどバイブ非対応端末の視覚フィードバック） */
     @keyframes flashGreen {
       0% { box-shadow: inset 0 0 0 8px rgba(34, 197, 94, 0.85); }
@@ -113,17 +105,24 @@
       </div>
 
       <!-- カメラ映像コンテナ -->
-      <div id="cameraWrapper" class="hidden relative rounded-xl overflow-hidden bg-black aspect-[16/9] max-h-56">
-        <div id="qr-reader" class="w-full h-full"></div>
-        <!-- 中央照準ガイド（誤爆防止の目安） -->
+      <div id="cameraWrapper" class="hidden relative rounded-xl overflow-hidden bg-black h-56">
+        <video id="camVideo" class="absolute inset-0 w-full h-full object-cover" playsinline muted autoplay></video>
+        <!-- 中央照準ガイド（この枠の中央に一番近いバーコードだけを読み取ります） -->
         <div class="pointer-events-none absolute inset-0 flex items-center justify-center">
-          <div class="w-[82%] h-20 border-2 border-emerald-400/90 rounded-lg relative shadow-[0_0_0_9999px_rgba(0,0,0,0.38)]">
+          <div id="scanGuide" class="w-[82%] h-20 border-2 border-emerald-400/90 rounded-lg relative shadow-[0_0_0_9999px_rgba(0,0,0,0.38)]">
             <div class="absolute top-1/2 left-2 right-2 h-0.5 bg-red-500/80"></div>
             <span class="absolute -top-5 left-1 text-[10px] font-bold text-emerald-300 bg-black/60 px-1.5 py-0.5 rounded">
               バーコードを赤線に合わせる
             </span>
           </div>
         </div>
+        <!-- ズーム切替 -->
+        <div class="absolute right-2 top-2 flex flex-col gap-1.5" id="zoomButtons">
+          <button type="button" data-zoom="1" class="zoom-btn w-9 h-9 rounded-full text-[11px] font-black">1x</button>
+          <button type="button" data-zoom="2" class="zoom-btn w-9 h-9 rounded-full text-[11px] font-black">2x</button>
+          <button type="button" data-zoom="3" class="zoom-btn w-9 h-9 rounded-full text-[11px] font-black">3x</button>
+        </div>
+        <div id="scanEngineLabel" class="absolute left-2 bottom-2 text-[10px] font-bold text-white/80 bg-black/50 px-1.5 py-0.5 rounded"></div>
       </div>
     </section>
 
@@ -201,10 +200,19 @@
         </div>
 
         <!-- マスタ外商品だった場合の品名手入力欄 -->
-        <div id="unregisteredNameBox" class="hidden bg-amber-50 border border-amber-200 rounded-xl p-2.5">
-          <label class="block text-xs font-bold text-amber-900 mb-1">マスタに無いJANです（品名・メモを任意入力）</label>
-          <input id="inputNewItemName" type="text" placeholder="例：〇〇シート 端数分" class="w-full px-3 py-2 rounded-lg bg-white border border-amber-300 text-sm font-medium outline-none" />
+        <div id="unregisteredNameBox" class="hidden bg-amber-50 border border-amber-200 rounded-xl p-2.5 space-y-2">
+          <div>
+            <label class="block text-xs font-bold text-amber-900 mb-1">一覧の商品にひも付ける（品名・品番で検索）</label>
+            <input id="inputLinkSearch" type="text" placeholder="例：バケツ、TRDB" class="w-full px-3 py-2 rounded-lg bg-white border border-amber-300 text-sm font-medium outline-none" />
+            <div id="linkResults" class="mt-1.5 max-h-48 overflow-y-auto divide-y divide-amber-100 rounded-lg bg-white border border-amber-200 hidden"></div>
+            <p class="text-[10px] text-amber-800 mt-1">選んだ商品にこのバーコードを覚えさせます。次回から読み取るだけでその商品が出ます。在庫スイートの登録コードは変わりません。</p>
+          </div>
+          <div class="pt-1 border-t border-amber-200">
+            <label class="block text-xs font-bold text-amber-900 mb-1">一覧に無い商品として数える場合（品名・メモを任意入力）</label>
+            <input id="inputNewItemName" type="text" placeholder="例：〇〇シート 端数分" class="w-full px-3 py-2 rounded-lg bg-white border border-amber-300 text-sm font-medium outline-none" />
+          </div>
         </div>
+        <div id="aliasInfo" class="hidden text-[11px] text-slate-500"></div>
 
         <!-- 実数手入力フォーム -->
         <div class="bg-slate-50 rounded-xl p-3 border border-slate-200 space-y-2.5">
@@ -213,6 +221,7 @@
               実数を入力（<span id="inputStaffLabel" class="text-emerald-700">Aさん</span>のカウント）
             </label>
             <div class="flex items-center gap-1">
+              <button type="button" data-quick-add="-1" class="quick-add-btn px-2.5 py-1 rounded-lg bg-white border border-slate-300 text-xs font-extrabold text-slate-700 active:bg-slate-200">-1</button>
               <button type="button" data-quick-add="1" class="quick-add-btn px-2.5 py-1 rounded-lg bg-white border border-slate-300 text-xs font-extrabold text-slate-700 active:bg-slate-200">+1</button>
               <button type="button" data-quick-add="5" class="quick-add-btn px-2.5 py-1 rounded-lg bg-white border border-slate-300 text-xs font-extrabold text-slate-700 active:bg-slate-200">+5</button>
               <button type="button" data-quick-add="10" class="quick-add-btn px-2.5 py-1 rounded-lg bg-white border border-slate-300 text-xs font-extrabold text-slate-700 active:bg-slate-200">+10</button>
@@ -248,6 +257,9 @@
           <p class="text-[11px] text-slate-500 text-center">
             ※3人で別々の棚を数えるときは緑の<strong>「加算して確定」</strong>を使うと合算されます
           </p>
+          <button id="btnUncount" type="button" class="hidden w-full py-2 rounded-xl bg-white border border-red-200 text-red-600 text-xs font-bold">
+            未カウントに戻す（全員分の数を消す）
+          </button>
         </div>
       </div>
     </section>
@@ -327,6 +339,18 @@
             📄 CSV 出力
           </button>
         </div>
+        <div class="flex items-center justify-between gap-2 text-xs">
+          <label for="selCsvEncoding" class="font-bold text-slate-700">CSVの文字コード</label>
+          <select id="selCsvEncoding" class="px-2 py-1.5 rounded-lg border border-slate-300 bg-white font-bold">
+            <option value="sjis">Shift_JIS（在庫スイート・Excel向け）</option>
+            <option value="utf8">UTF-8</option>
+          </select>
+        </div>
+        <label class="flex items-center gap-2 text-xs font-bold text-slate-700">
+          <input id="chkExportCountedOnly" type="checkbox" class="w-4 h-4" />
+          カウント済みの商品だけ出力する
+        </label>
+        <p class="text-[11px] text-slate-500">バーコード欄は在庫スイートの登録コードのまま出力します。文字化けする場合は文字コードを切り替えてください。</p>
       </div>
 
       <div class="pt-2 border-t border-slate-100 flex justify-between items-center">
@@ -386,7 +410,8 @@
      * =========================================================================
      * リアルタイム棚卸し PWA コアロジック
      * - Excel (SheetJS) 読み込み・書き出し
-     * - html5-qrcode + トーチ（ライト）+ Web Audio API 効果音 + バイブレーション
+     * - BarcodeDetector（Android）/ ZXing-C++ WebAssembly（iPhone）＋ ズーム・ライト + 効果音 + バイブレーション
+     * - 枠の中心に一番近いバーコードだけ採用、未登録バーコードのひも付け
      * - 現状在庫（現品数）照合 ＋ 分担加算 / 上書き手入力
      * - BroadcastChannel（同一ブラウザ/複数タブ）＆ Firebase REST/SSE リアルタイム同期対応
      * =========================================================================
@@ -408,7 +433,13 @@
     let itemsMap = {};
     let activeBarcode = null;
     let currentFilter = 'all';
-    let html5QrCode = null;
+    let camStream = null;
+    let camTrack = null;
+    let barcodeDetector = null;
+    let scanLoopTimer = null;
+    let scanBusy = false;
+    let currentZoom = Number(localStorage.getItem('janscan_zoom_v1') || '1') || 1;
+    let hwZoom = null; // { min, max } ハードウェアズーム対応時
     let isCameraRunning = false;
     let isTorchOn = false;
     let lastScannedCode = '';
@@ -489,17 +520,76 @@
     }
 
     // --- Firebase Realtime Database リアルタイム同期（URL設定時のみ有効） ---
+    // Firebaseのキーに使えない文字（. # $ [ ] /）を置き換える。商品の本当のコードは item.barcode に入っている
+    function fbKey(str) {
+      return String(str || '').replace(/[.#$\[\]\/%]/g, (c) => '_' + c.charCodeAt(0).toString(16).toUpperCase() + '_');
+    }
+
+    function fbBase() {
+      return (settings.firebaseUrl || '').trim().replace(/\/+$/, '');
+    }
+
+    function fbRoomItemsUrl() {
+      return `${fbBase()}/rooms/${encodeURIComponent(fbKey(settings.roomId))}/items`;
+    }
+
+    // Firebaseから受け取ったデータの写し（キー → 商品データ）
+    let remoteTree = {};
+
+    function applyRemotePath(path, data, isPatch) {
+      const segs = String(path || '/').split('/').filter(Boolean);
+      if (segs.length === 0) {
+        if (isPatch) {
+          Object.entries(data || {}).forEach(([k, v]) => {
+            if (v === null) delete remoteTree[k]; else remoteTree[k] = v;
+          });
+        } else {
+          remoteTree = (data && typeof data === 'object') ? data : {};
+        }
+      } else {
+        let node = remoteTree;
+        for (let i = 0; i < segs.length - 1; i++) {
+          if (!node[segs[i]] || typeof node[segs[i]] !== 'object') node[segs[i]] = {};
+          node = node[segs[i]];
+        }
+        const last = segs[segs.length - 1];
+        if (isPatch) {
+          if (!node[last] || typeof node[last] !== 'object') node[last] = {};
+          Object.entries(data || {}).forEach(([k, v]) => {
+            if (v === null) delete node[last][k]; else node[last][k] = v;
+          });
+        } else if (data === null) {
+          delete node[last];
+        } else {
+          node[last] = data;
+        }
+      }
+      // 写しから itemsMap を作り直す
+      const next = {};
+      Object.values(remoteTree).forEach((item) => {
+        if (item && item.barcode) {
+          next[item.barcode] = {
+            ...item,
+            countsByStaff: item.countsByStaff || {},
+            aliases: Array.isArray(item.aliases) ? item.aliases : Object.values(item.aliases || {})
+          };
+        }
+      });
+      itemsMap = next;
+      saveLocalState(false);
+      refreshAllViews();
+    }
+
     function connectRealtimeSync() {
       if (firebaseEventSource) {
         firebaseEventSource.close();
         firebaseEventSource = null;
       }
 
-      const baseUrl = (settings.firebaseUrl || '').trim().replace(/\/+$/, '');
       const syncBadge = document.getElementById('syncBadge');
       const fbStatus = document.getElementById('firebaseStatusBadge');
 
-      if (!baseUrl) {
+      if (!fbBase()) {
         syncBadge.textContent = 'ローカル/同一端末同期';
         syncBadge.className = 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 shrink-0';
         fbStatus.textContent = '未接続（ローカルモード）';
@@ -507,33 +597,33 @@
         return;
       }
 
-      const roomUrl = `${baseUrl}/rooms/${encodeURIComponent(settings.roomId)}/items.json`;
-
       try {
         // Server-Sent Events (SSE) でFirebaseのリアルタイム変更を購読
-        firebaseEventSource = new EventSource(roomUrl);
+        firebaseEventSource = new EventSource(`${fbRoomItemsUrl()}.json`);
 
         firebaseEventSource.addEventListener('put', (e) => {
-          const payload = JSON.parse(e.data);
-          if (payload.path === '/' && payload.data) {
-            itemsMap = payload.data;
-            saveLocalState(false);
-            refreshAllViews();
-          } else if (payload.path && payload.path.startsWith('/') && payload.data) {
-            const code = decodeURIComponent(payload.path.slice(1));
-            itemsMap[code] = payload.data;
-            saveLocalState(false);
-            refreshAllViews();
-          }
+          try {
+            const payload = JSON.parse(e.data);
+            // 共有サーバーが空で、この端末にデータがある場合は消さずに送る
+            if ((payload.path === '/' || !payload.path) && payload.data === null && Object.keys(itemsMap).length) {
+              remoteTree = {};
+              pushAllItemsToFirebase();
+              return;
+            }
+            applyRemotePath(payload.path, payload.data, false);
+          } catch (err) { console.warn(err); }
         });
 
         firebaseEventSource.addEventListener('patch', (e) => {
-          const payload = JSON.parse(e.data);
-          if (payload.path === '/' && payload.data) {
-            Object.assign(itemsMap, payload.data);
-            saveLocalState(false);
-            refreshAllViews();
-          }
+          try {
+            const payload = JSON.parse(e.data);
+            applyRemotePath(payload.path, payload.data, true);
+          } catch (err) { console.warn(err); }
+        });
+
+        firebaseEventSource.addEventListener('cancel', () => {
+          fbStatus.textContent = '読み取り権限がありません（Firebaseのルールを確認）';
+          fbStatus.className = 'text-[10px] font-bold px-2 py-0.5 rounded bg-red-100 text-red-700';
         });
 
         firebaseEventSource.onopen = () => {
@@ -552,34 +642,51 @@
       }
     }
 
-    async function pushItemToFirebase(item, activityLogText) {
-      const baseUrl = (settings.firebaseUrl || '').trim().replace(/\/+$/, '');
-      if (!baseUrl) return;
-      const itemUrl = `${baseUrl}/rooms/${encodeURIComponent(settings.roomId)}/items/${encodeURIComponent(item.barcode)}.json`;
+    async function fbRequest(path, method, body) {
+      if (!fbBase()) return;
       try {
-        await fetch(itemUrl, {
-          method: 'PUT',
+        const res = await fetch(`${fbRoomItemsUrl()}${path}.json`, {
+          method,
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(item)
+          body: body === undefined ? undefined : JSON.stringify(body)
         });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
       } catch (e) {
         console.warn('クラウド送信失敗（ローカルには保存済み）:', e);
+        showToast('⚠️ 共有サーバーへの送信に失敗しました（この端末には保存済み）', 'warn');
       }
     }
 
+    // 商品データ（数以外）を送る。数は担当者ごとに別で送るので、他の人の数を上書きしない
+    function pushItemToFirebase(item) {
+      const { countsByStaff, ...meta } = item;
+      return fbRequest(`/${encodeURIComponent(fbKey(item.barcode))}`, 'PATCH', meta);
+    }
+
+    // 自分の担当分の数だけを送る（他の人の数はそのまま）
+    function pushMyCountToFirebase(item, value) {
+      return fbRequest(`/${encodeURIComponent(fbKey(item.barcode))}/countsByStaff/${encodeURIComponent(fbKey(settings.staffName))}`, 'PUT', value);
+    }
+
+    function pushCountsToFirebase(item) {
+      const counts = {};
+      Object.entries(item.countsByStaff || {}).forEach(([k, v]) => { counts[fbKey(k)] = v; });
+      return fbRequest(`/${encodeURIComponent(fbKey(item.barcode))}/countsByStaff`, 'PUT', counts);
+    }
+
+    function removeItemFromFirebase(barcode) {
+      return fbRequest(`/${encodeURIComponent(fbKey(barcode))}`, 'DELETE');
+    }
+
     async function pushAllItemsToFirebase() {
-      const baseUrl = (settings.firebaseUrl || '').trim().replace(/\/+$/, '');
-      if (!baseUrl) return;
-      const roomUrl = `${baseUrl}/rooms/${encodeURIComponent(settings.roomId)}/items.json`;
-      try {
-        await fetch(roomUrl, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(itemsMap)
-        });
-      } catch (e) {
-        console.warn('マスタ一括アップロード失敗:', e);
-      }
+      if (!fbBase()) return;
+      const tree = {};
+      Object.values(itemsMap).forEach((item) => {
+        const counts = {};
+        Object.entries(item.countsByStaff || {}).forEach(([k, v]) => { counts[fbKey(k)] = v; });
+        tree[fbKey(item.barcode)] = { ...item, countsByStaff: counts };
+      });
+      await fbRequest('', 'PUT', tree);
     }
 
     // --- 効果音（Web Audio API）＆ バイブレーション＆画面フラッシュ ---
@@ -640,91 +747,236 @@
     }
 
     // --- カメラバーコードスキャナ ＆ トーチ（ライト）制御 ---
+    // 読み取る種類（Interleaved 2 of 5 は誤読しやすいので除外）
+    const SCAN_FORMATS = ['code_128', 'ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_39', 'code_93', 'qr_code', 'data_matrix'];
+    const POLYFILL_URL = 'https://fastly.jsdelivr.net/npm/barcode-detector@3.2.3/dist/es/ponyfill.min.js';
+
+    async function createBarcodeDetector() {
+      // 1. 端末内蔵（Android Chrome など）
+      if ('BarcodeDetector' in window) {
+        try {
+          const supported = await window.BarcodeDetector.getSupportedFormats();
+          if (supported.includes('code_128') && supported.includes('ean_13')) {
+            const formats = SCAN_FORMATS.filter((f) => supported.includes(f));
+            return { detector: new window.BarcodeDetector({ formats }), engine: '端末内蔵' };
+          }
+        } catch (e) { /* 使えなければ下へ */ }
+      }
+      // 2. ZXing-C++（iPhone Safari など）
+      const mod = await import(POLYFILL_URL);
+      return { detector: new mod.BarcodeDetector({ formats: SCAN_FORMATS }), engine: 'ZXing' };
+    }
+
     async function toggleCamera() {
       const wrapper = document.getElementById('cameraWrapper');
       const label = document.getElementById('camBtnLabel');
       const icon = document.getElementById('camBtnIcon');
       const torchBtn = document.getElementById('btnTorch');
 
-      if (isCameraRunning && html5QrCode) {
-        try {
-          if (isTorchOn) await setTorch(false);
-          await html5QrCode.stop();
-          html5QrCode.clear();
-        } catch (e) {}
-        isCameraRunning = false;
-        wrapper.classList.add('hidden');
-        label.textContent = 'カメラスキャン開始';
-        icon.textContent = '📷';
-        torchBtn.disabled = true;
+      if (isCameraRunning) {
+        stopCamera();
         return;
       }
 
       wrapper.classList.remove('hidden');
-      label.textContent = 'カメラ停止';
-      icon.textContent = '⏹️';
+      label.textContent = '準備中…';
+      icon.textContent = '⏳';
 
       try {
-        html5QrCode = new Html5Qrcode('qr-reader');
-        const config = {
-          fps: 12,
-          qrbox: { width: 260, height: 110 },
-          aspectRatio: 1.777,
-          formatsToSupport: [
-            Html5QrcodeSupportedFormats.EAN_13,
-            Html5QrcodeSupportedFormats.EAN_8,
-            Html5QrcodeSupportedFormats.CODE_128,
-            Html5QrcodeSupportedFormats.CODE_39,
-            Html5QrcodeSupportedFormats.UPC_A,
-            Html5QrcodeSupportedFormats.UPC_E,
-            Html5QrcodeSupportedFormats.QR_CODE
-          ]
-        };
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error('このブラウザはカメラに対応していません（https で開いているか確認してください）');
+        }
+        if (!barcodeDetector) {
+          const created = await createBarcodeDetector();
+          barcodeDetector = created.detector;
+          document.getElementById('scanEngineLabel').textContent = `読み取り: ${created.engine}`;
+        }
 
-        await html5QrCode.start(
-          { facingMode: 'environment' },
-          config,
-          (decodedText) => handleBarcodeScanned(decodedText),
-          () => {} // スキャン未検出フレームは無視
-        );
+        camStream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 }
+          }
+        });
+        camTrack = camStream.getVideoTracks()[0];
+        const video = document.getElementById('camVideo');
+        video.srcObject = camStream;
+        await video.play();
+
+        // ピントを連続オートに（対応端末のみ）
+        try {
+          const caps = camTrack.getCapabilities ? camTrack.getCapabilities() : {};
+          if (caps.focusMode && caps.focusMode.includes('continuous')) {
+            await camTrack.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+          }
+          hwZoom = (caps.zoom && caps.zoom.max > caps.zoom.min) ? { min: caps.zoom.min, max: caps.zoom.max } : null;
+          torchBtn.disabled = !caps.torch;
+        } catch (e) {
+          hwZoom = null;
+        }
 
         isCameraRunning = true;
-        torchBtn.disabled = false;
+        label.textContent = 'カメラ停止';
+        icon.textContent = '⏹️';
+        await applyZoom(currentZoom);
+        scheduleScan();
       } catch (err) {
-        showToast('カメラを起動できませんでした（HTTPS環境・カメラ権限をご確認ください）', 'error');
-        wrapper.classList.add('hidden');
-        label.textContent = 'カメラスキャン開始';
-        icon.textContent = '📷';
-        isCameraRunning = false;
+        console.error(err);
+        stopCamera();
+        const msg = (err && err.name === 'NotAllowedError')
+          ? 'カメラが許可されていません。ブラウザの設定でカメラを許可してください'
+          : `カメラを起動できませんでした：${err && err.message ? err.message : err}`;
+        showToast(msg, 'error');
+      }
+    }
+
+    function stopCamera() {
+      clearTimeout(scanLoopTimer);
+      scanLoopTimer = null;
+      if (camTrack && isTorchOn) {
+        try { camTrack.applyConstraints({ advanced: [{ torch: false }] }); } catch (e) {}
+      }
+      isTorchOn = false;
+      if (camStream) camStream.getTracks().forEach((t) => t.stop());
+      camStream = null;
+      camTrack = null;
+      isCameraRunning = false;
+      const video = document.getElementById('camVideo');
+      video.srcObject = null;
+      document.getElementById('cameraWrapper').classList.add('hidden');
+      document.getElementById('camBtnLabel').textContent = 'カメラスキャン開始';
+      document.getElementById('camBtnIcon').textContent = '📷';
+      const torchBtn = document.getElementById('btnTorch');
+      torchBtn.disabled = true;
+      updateTorchButton();
+    }
+
+    // ズーム：対応端末はカメラ自体をズーム、非対応（iPhone Safari等）は映像を拡大して中央を切り出す
+    async function applyZoom(z) {
+      currentZoom = z;
+      localStorage.setItem('janscan_zoom_v1', String(z));
+      const video = document.getElementById('camVideo');
+      if (hwZoom && camTrack) {
+        const target = Math.min(hwZoom.max, Math.max(hwZoom.min, hwZoom.min * z));
+        try {
+          await camTrack.applyConstraints({ advanced: [{ zoom: target }] });
+          video.style.transform = '';
+        } catch (e) {
+          video.style.transform = `scale(${z})`;
+        }
+      } else {
+        video.style.transform = z === 1 ? '' : `scale(${z})`;
+      }
+      document.querySelectorAll('.zoom-btn').forEach((b) => {
+        const on = Number(b.dataset.zoom) === z;
+        b.className = 'zoom-btn w-9 h-9 rounded-full text-[11px] font-black ' +
+          (on ? 'bg-yellow-400 text-slate-950' : 'bg-black/55 text-white');
+      });
+    }
+
+    function digitalZoom() {
+      const video = document.getElementById('camVideo');
+      return video.style.transform ? currentZoom : 1;
+    }
+
+    function scheduleScan() {
+      clearTimeout(scanLoopTimer);
+      if (!isCameraRunning) return;
+      scanLoopTimer = setTimeout(scanFrame, 110);
+    }
+
+    const scanCanvas = document.createElement('canvas');
+
+    // 枠（読み取り範囲）を映像上の座標に変換して、その部分だけを読み取る
+    async function scanFrame() {
+      if (!isCameraRunning || scanBusy) { scheduleScan(); return; }
+      const video = document.getElementById('camVideo');
+      const wrapper = document.getElementById('cameraWrapper');
+      const guide = document.getElementById('scanGuide');
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (!vw || !vh) { scheduleScan(); return; }
+
+      // 数量を入力中は読み取らない（入力途中で別の商品に切り替わらないように）
+      if (document.activeElement && ['qtyInput', 'inputNewItemName', 'inputLinkSearch', 'searchInput'].includes(document.activeElement.id)) {
+        scheduleScan();
+        return;
+      }
+
+      scanBusy = true;
+      try {
+        const wr = wrapper.getBoundingClientRect();
+        const gr = guide.getBoundingClientRect();
+        const cw = wr.width, ch = wr.height;
+        const z = digitalZoom();
+        const scale = Math.max(cw / vw, ch / vh) * z;   // object-cover ＋ 拡大
+        const ox = (cw - vw * scale) / 2;
+        const oy = (ch - vh * scale) / 2;
+
+        // 読み取り範囲：枠より上下に広め（角度が付いて斜めに映っても読めるように）
+        const gx = gr.left - wr.left, gy = gr.top - wr.top;
+        const rx = Math.max(0, gx - 20), ry = Math.max(0, gy - 50);
+        const rw = Math.min(cw, gx + gr.width + 20) - rx;
+        const rh = Math.min(ch, gy + gr.height + 50) - ry;
+
+        let sx = (rx - ox) / scale, sy = (ry - oy) / scale;
+        let sw = rw / scale, sh = rh / scale;
+        sx = Math.max(0, sx); sy = Math.max(0, sy);
+        sw = Math.min(vw - sx, sw); sh = Math.min(vh - sy, sh);
+
+        // 切り出した部分を最大1600px幅で描画
+        const k = Math.min(1, 1600 / sw);
+        scanCanvas.width = Math.round(sw * k);
+        scanCanvas.height = Math.round(sh * k);
+        const ctx = scanCanvas.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(video, sx, sy, sw, sh, 0, 0, scanCanvas.width, scanCanvas.height);
+
+        const results = await barcodeDetector.detect(scanCanvas);
+        if (results && results.length) {
+          // 枠の中心（＝切り出し範囲の中心付近）に一番近いものを採用
+          const gcx = ((gx + gr.width / 2 - ox) / scale - sx) * k;
+          const gcy = ((gy + gr.height / 2 - oy) / scale - sy) * k;
+          let best = null;
+          for (const r of results) {
+            if (!r.rawValue) continue;
+            const b = r.boundingBox || { x: 0, y: 0, width: 0, height: 0 };
+            const d = Math.hypot(b.x + b.width / 2 - gcx, b.y + b.height / 2 - gcy);
+            if (!best || d < best.d) best = { code: r.rawValue, d };
+          }
+          if (best) handleBarcodeScanned(best.code);
+        }
+      } catch (e) {
+        console.warn('読み取りエラー:', e);
+      } finally {
+        scanBusy = false;
+        scheduleScan();
       }
     }
 
     async function setTorch(enable) {
+      if (!camTrack) {
+        showToast('カメラ起動中のみライトを使用できます', 'warn');
+        return;
+      }
+      try {
+        await camTrack.applyConstraints({ advanced: [{ torch: enable }] });
+        isTorchOn = enable;
+      } catch (e) {
+        showToast('この端末のブラウザはライト操作に対応していません', 'warn');
+      }
+      updateTorchButton();
+    }
+
+    function updateTorchButton() {
       const torchBtn = document.getElementById('btnTorch');
       const torchLabel = document.getElementById('torchLabel');
-      try {
-        const videoEl = document.querySelector('#qr-reader video');
-        if (!videoEl || !videoEl.srcObject) {
-          showToast('カメラ起動中のみライトを使用できます', 'warn');
-          return;
-        }
-        const track = videoEl.srcObject.getVideoTracks()[0];
-        const capabilities = track.getCapabilities ? track.getCapabilities() : {};
-        if (!capabilities.torch) {
-          showToast('この端末のブラウザはライト制御に非対応です', 'warn');
-          return;
-        }
-        await track.applyConstraints({ advanced: [{ torch: enable }] });
-        isTorchOn = enable;
-        if (isTorchOn) {
-          torchBtn.className = 'px-3 py-2 rounded-xl bg-amber-400 text-slate-950 font-black text-xs sm:text-sm flex items-center gap-1 shadow active:scale-95 transition';
-          torchLabel.textContent = 'ライトON';
-        } else {
-          torchBtn.className = 'px-3 py-2 rounded-xl bg-slate-800 text-slate-200 font-bold text-xs sm:text-sm border border-slate-700 flex items-center gap-1 active:scale-95 transition';
-          torchLabel.textContent = 'ライト';
-        }
-      } catch (e) {
-        showToast('ライトの切り替えに失敗しました', 'warn');
+      if (isTorchOn) {
+        torchBtn.className = 'px-3 py-2 rounded-xl bg-amber-400 text-slate-950 font-black text-xs sm:text-sm flex items-center gap-1 shadow active:scale-95 transition';
+        torchLabel.textContent = 'ライトON';
+      } else {
+        torchBtn.className = 'px-3 py-2 rounded-xl bg-slate-800 text-slate-200 disabled:opacity-40 font-bold text-xs sm:text-sm border border-slate-700 flex items-center gap-1 active:scale-95 transition';
+        torchLabel.textContent = 'ライト';
       }
     }
 
@@ -733,9 +985,10 @@
       const code = String(rawCode || '').trim();
       if (!code) return;
 
-      // 同じバーコードの連続誤読防止（1.5秒クールダウン）
+      // 同じバーコードは、一度カメラから外れる（1秒以上見えなくなる）までは読まない
       const now = Date.now();
-      if (code === lastScannedCode && (now - lastScannedTime) < 1500) {
+      if (code === lastScannedCode && (now - lastScannedTime) < 1000) {
+        lastScannedTime = now;
         return;
       }
       lastScannedCode = code;
@@ -744,7 +997,103 @@
       selectItemByBarcode(code, true);
     }
 
-    function selectItemByBarcode(code, fromScanner = false) {
+    // --- バーコード → 商品 の照合（ひも付け・自社コード・UPC/EANの違いも吸収） ---
+    function isValidJAN(code) {
+      if (!/^\d{8}$|^\d{13}$/.test(code)) return false;
+      const d = code.split('').map(Number);
+      const last = d.pop();
+      let sum = 0;
+      d.reverse().forEach((v, i) => { sum += (i % 2 === 0) ? v * 3 : v; });
+      return (10 - (sum % 10)) % 10 === last;
+    }
+
+    function normCode(c) {
+      return String(c || '').trim().toUpperCase();
+    }
+
+    function findItemCode(scanned) {
+      const k = normCode(scanned);
+      if (!k) return null;
+      for (const item of Object.values(itemsMap)) {
+        if (normCode(item.barcode) === k) return item.barcode;
+      }
+      for (const item of Object.values(itemsMap)) {
+        if ((item.aliases || []).some((a) => normCode(a) === k)) return item.barcode;
+      }
+      // UPC-A（12桁）と EAN-13（先頭0付き）の違い
+      const alt = (k.length === 13 && k.startsWith('0')) ? k.slice(1)
+        : (k.length === 12 && /^\d+$/.test(k)) ? '0' + k : null;
+      if (alt) {
+        for (const item of Object.values(itemsMap)) {
+          if (normCode(item.barcode) === alt) return item.barcode;
+        }
+      }
+      for (const item of Object.values(itemsMap)) {
+        if (item.internalCode && normCode(item.internalCode) === k) return item.barcode;
+      }
+      return null;
+    }
+
+    function autoAliases(barcode, existingAliases) {
+      const list = [...(existingAliases || [])];
+      // 「ST-45132003153」→ 頭の49が置き換わった形なら 4945132003153 もひも付け
+      if (barcode.startsWith('ST-')) {
+        const jan = '49' + barcode.slice(3);
+        if (isValidJAN(jan) && !list.includes(jan)) list.push(jan);
+      }
+      return list;
+    }
+
+    function linkAliasToItem(alias, targetBarcode) {
+      const item = itemsMap[targetBarcode];
+      if (!item) return;
+      item.aliases = item.aliases || [];
+      if (!item.aliases.includes(alias) && normCode(alias) !== normCode(targetBarcode)) {
+        item.aliases.push(alias);
+      }
+      // 仮で作られた未登録データがあれば消す（数は引き継ぐ）
+      const temp = itemsMap[alias];
+      if (temp && temp.unregistered && alias !== targetBarcode) {
+        Object.entries(temp.countsByStaff || {}).forEach(([staff, q]) => {
+          item.countsByStaff = item.countsByStaff || {};
+          item.countsByStaff[staff] = (Number(item.countsByStaff[staff]) || 0) + (Number(q) || 0);
+        });
+        delete itemsMap[alias];
+        removeItemFromFirebase(alias);
+      }
+      saveLocalState(true);
+      pushItemToFirebase(item);
+      showToast(`🔗 ${alias} を「${item.name}」にひも付けました`, 'success');
+      setActivityTicker(`🔗 ${settings.staffName}：${alias} →「${item.name}」`);
+      selectItemByBarcode(item.barcode, false);
+      renderInventoryList();
+    }
+
+    function renderLinkResults() {
+      const box = document.getElementById('linkResults');
+      const q = document.getElementById('inputLinkSearch').value;
+      const tokens = q.trim().split(/\s+/).map(normalizeText).filter(Boolean);
+      if (!tokens.length) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+      const matches = Object.values(itemsMap).filter((item) => {
+        if (item.unregistered) return false;
+        const target = normalizeText(`${item.name} ${item.partNo} ${item.internalCode} ${item.barcode}`);
+        return tokens.every((t) => target.includes(t));
+      }).slice(0, 30);
+      box.classList.remove('hidden');
+      if (!matches.length) {
+        box.innerHTML = `<div class="p-2.5 text-xs text-slate-400 text-center">見つかりませんでした</div>`;
+        return;
+      }
+      box.innerHTML = matches.map((item) => `
+        <button type="button" data-link-code="${escapeHtml(item.barcode)}" class="w-full text-left px-2.5 py-2 hover:bg-amber-50 active:bg-amber-100">
+          <div class="text-xs font-bold text-slate-900 truncate">${escapeHtml(item.name)}</div>
+          <div class="text-[11px] text-slate-500 font-mono truncate">${escapeHtml(item.partNo || '')} ／ ${escapeHtml(item.barcode)}</div>
+        </button>`).join('');
+    }
+
+    function selectItemByBarcode(scannedCode, fromScanner = false) {
+      const resolved = findItemCode(scannedCode);
+      const code = resolved || String(scannedCode).trim();
       activeBarcode = code;
       const existing = itemsMap[code];
 
@@ -795,11 +1144,26 @@
       const unregBox = document.getElementById('unregisteredNameBox');
       if (item.unregistered) {
         unregBadge.classList.remove('hidden');
+        if (unregBox.classList.contains('hidden') || unregBox.dataset.code !== item.barcode) {
+          document.getElementById('inputLinkSearch').value = '';
+          renderLinkResults();
+        }
+        unregBox.dataset.code = item.barcode;
         unregBox.classList.remove('hidden');
-        document.getElementById('inputNewItemName').value = item.name || '';
+        document.getElementById('inputNewItemName').value = (item.name && !item.name.startsWith('未登録商品')) ? item.name : '';
       } else {
         unregBadge.classList.add('hidden');
         unregBox.classList.add('hidden');
+      }
+
+      const aliasInfo = document.getElementById('aliasInfo');
+      if (item.aliases && item.aliases.length) {
+        aliasInfo.classList.remove('hidden');
+        aliasInfo.innerHTML = '🔗 ひも付け済み: ' + item.aliases.map((a) =>
+          `<span class="font-mono">${escapeHtml(a)}</span> <button type="button" data-unlink="${escapeHtml(a)}" class="text-red-500 font-bold underline">解除</button>`).join('　');
+      } else {
+        aliasInfo.classList.add('hidden');
+        aliasInfo.innerHTML = '';
       }
 
       const unit = item.unit || '個';
@@ -857,6 +1221,7 @@
         diffLabelEl.textContent = '⚠️ 超過';
       }
 
+      document.getElementById('btnUncount').classList.toggle('hidden', !hasCounted);
       document.getElementById('inputStaffLabel').textContent = settings.staffName;
       document.getElementById('activeItemCard').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
@@ -893,13 +1258,14 @@
       }
 
       if (!item.countsByStaff) item.countsByStaff = {};
+      const staffKey = fbKey(settings.staffName);
 
       if (mode === 'add') {
-        const prev = Number(item.countsByStaff[settings.staffName]) || 0;
-        item.countsByStaff[settings.staffName] = prev + numVal;
+        const prev = Number(item.countsByStaff[staffKey]) || 0;
+        item.countsByStaff[staffKey] = prev + numVal;
       } else {
         // 上書きモード：他の人の内訳をリセットし、現在の担当者の値で合計を統一
-        item.countsByStaff = { [settings.staffName]: numVal };
+        item.countsByStaff = { [staffKey]: numVal };
       }
 
       item.updatedAt = new Date().toISOString();
@@ -919,12 +1285,17 @@
       }
 
       saveLocalState(true);
-      pushItemToFirebase(item);
+      pushItemToFirebase(item).then(() => {
+        if (mode === 'add') pushMyCountToFirebase(item, item.countsByStaff[staffKey]);
+        else pushCountsToFirebase(item);
+      });
 
       const logMsg = `📝 ${settings.staffName}：「${item.name}」を ${mode === 'add' ? `+${numVal}` : `=${numVal}`}（合計 ${totalAfter}）`;
       setActivityTicker(logMsg);
 
-      document.getElementById('qtyInput').value = '';
+      const qtyEl = document.getElementById('qtyInput');
+      qtyEl.value = '';
+      qtyEl.blur();   // 入力を終えたら読み取りを再開
       openActiveCard(item);
       renderInventoryList();
     }
@@ -1081,7 +1452,21 @@
       reader.onload = (e) => {
         try {
           const data = new Uint8Array(e.target.result);
-          const workbook = XLSX.read(data, { type: 'array' });
+          let workbook;
+          const isZip = data[0] === 0x50 && data[1] === 0x4B;           // xlsx
+          const isOle = data[0] === 0xD0 && data[1] === 0xCF;           // 古いxls
+          if (isZip || isOle) {
+            workbook = XLSX.read(data, { type: 'array' });
+          } else {
+            // CSV：UTF-8で読めなければShift_JISとして読む。数字の先頭0が消えないよう文字のまま読む
+            let text;
+            try {
+              text = new TextDecoder('utf-8', { fatal: true }).decode(data);
+            } catch (err) {
+              text = new TextDecoder('shift_jis').decode(data);
+            }
+            workbook = XLSX.read(text.replace(/^\uFEFF/, ''), { type: 'string', raw: true });
+          }
           // 'in' シートがあれば優先、なければ先頭シート
           const targetSheetName = workbook.SheetNames.includes('in') ? 'in' : workbook.SheetNames[0];
           const sheet = workbook.Sheets[targetSheetName];
@@ -1095,10 +1480,14 @@
           let importedCount = 0;
           rows.forEach((row) => {
             // 列名のゆらぎに対応（瀬戸在庫シート: バーコード, 自社コード, 品名, 品番, 現品数, 有効在庫数, 単位）
-            const barcode = String(row['バーコード'] || row['JAN'] || row['JANコード'] || '').trim();
+            const barcode = String(row['バーコード'] ?? row['JAN'] ?? row['JANコード'] ?? '').trim();
             if (!barcode) return;
 
             const existing = itemsMap[barcode];
+            const aliasCol = String(row['ひも付けバーコード'] || '').trim();
+            let aliases = existing ? (existing.aliases || []) : [];
+            if (aliasCol) aliasCol.split(/\s+/).forEach((a) => { if (a && !aliases.includes(a)) aliases.push(a); });
+            aliases = autoAliases(barcode, aliases);
             itemsMap[barcode] = {
               barcode,
               internalCode: String(row['自社コード'] || '').trim(),
@@ -1109,6 +1498,7 @@
               unit: String(row['単位'] || '個').trim(),
               // すでにカウント中のデータがあれば引き継ぐ
               countsByStaff: existing ? (existing.countsByStaff || {}) : {},
+              aliases,
               unregistered: false
             };
             importedCount++;
@@ -1149,13 +1539,37 @@
     }
 
     // --- Excel / CSV 書き出し ---
-    function exportData(format) {
-      const list = Object.values(itemsMap);
+    function loadScript(src) {
+      return new Promise((resolve, reject) => {
+        const el = document.createElement('script');
+        el.src = src;
+        el.onload = resolve;
+        el.onerror = () => reject(new Error('読み込み失敗: ' + src));
+        document.head.appendChild(el);
+      });
+    }
+
+    function downloadBlob(blob, filename) {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    }
+
+    async function exportData(format) {
+      let list = Object.values(itemsMap);
+      const countedOnly = document.getElementById('chkExportCountedOnly').checked;
+      if (countedOnly) {
+        list = list.filter((item) => item.countsByStaff && Object.keys(item.countsByStaff).length > 0);
+      }
       if (list.length === 0) {
         showToast('出力するデータがありません', 'warn');
         return;
       }
 
+      const headers = ['バーコード', '自社コード', '品名', '品番', '現品数(現状)', '実棚数', '差異', '単位', '有効在庫数', '担当者内訳', '区分', '最終更新', 'ひも付けバーコード'];
       const exportRows = list.map((item) => {
         const actual = getActualTotal(item);
         const book = Number(item.bookQty) || 0;
@@ -1163,31 +1577,61 @@
         const breakdown = hasCounted
           ? Object.entries(item.countsByStaff).map(([k, v]) => `${k}:${v}`).join(' / ')
           : '';
-
-        return {
-          'バーコード': item.barcode,
-          '自社コード': item.internalCode || '',
-          '品名': item.name,
-          '品番': item.partNo || '',
-          '現品数(現状)': book,
-          '実棚数': hasCounted ? actual : '',
-          '差異': hasCounted ? (actual - book) : '',
-          '単位': item.unit || '',
-          '有効在庫数': item.availableQty || 0,
-          '担当者内訳': breakdown,
-          '区分': item.unregistered ? 'マスタ外' : 'マスタ一致',
-          '最終更新': item.updatedAt ? new Date(item.updatedAt).toLocaleString('ja-JP') : ''
-        };
+        return [
+          String(item.barcode),
+          item.internalCode || '',
+          item.name || '',
+          item.partNo || '',
+          book,
+          hasCounted ? actual : '',
+          hasCounted ? (actual - book) : '',
+          item.unit || '',
+          Number(item.availableQty) || 0,
+          breakdown,
+          item.unregistered ? 'マスタ外' : 'マスタ一致',
+          item.updatedAt ? new Date(item.updatedAt).toLocaleString('ja-JP') : '',
+          (item.aliases || []).join(' ')
+        ];
       });
-
-      const ws = XLSX.utils.json_to_sheet(exportRows);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, '棚卸し結果');
 
       const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
       const filename = `棚卸し結果_ルーム${settings.roomId}_${dateStr}.${format}`;
-      XLSX.writeFile(wb, filename);
-      showToast(`📥 ${filename} を出力しました`, 'success');
+
+      try {
+        if (format === 'xlsx') {
+          const ws = XLSX.utils.aoa_to_sheet([headers, ...exportRows]);
+          // バーコード列は文字として保存（Excelで 4.9E+12 のように崩れないように）
+          for (let r = 1; r <= exportRows.length; r++) {
+            const ref = XLSX.utils.encode_cell({ r, c: 0 });
+            if (ws[ref]) { ws[ref].t = 's'; ws[ref].v = String(ws[ref].v); }
+          }
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, ws, '棚卸し結果');
+          XLSX.writeFile(wb, filename);
+        } else {
+          const esc = (v) => {
+            const t = String(v ?? '');
+            return /[",\r\n]/.test(t) || typeof v === 'string' ? `"${t.replace(/"/g, '""')}"` : t;
+          };
+          const csv = [headers, ...exportRows].map((row) => row.map(esc).join(',')).join('\r\n') + '\r\n';
+          const enc = document.getElementById('selCsvEncoding').value;
+          let blob;
+          if (enc === 'sjis') {
+            if (!window.Encoding) {
+              await loadScript('https://cdn.jsdelivr.net/npm/encoding-japanese@2.2.0/encoding.min.js');
+            }
+            const sjis = window.Encoding.convert(window.Encoding.stringToCode(csv), { to: 'SJIS', from: 'UNICODE' });
+            blob = new Blob([new Uint8Array(sjis)], { type: 'text/csv' });
+          } else {
+            blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
+          }
+          downloadBlob(blob, filename);
+        }
+        showToast(`📥 ${filename} を出力しました`, 'success');
+      } catch (e) {
+        console.error(e);
+        showToast(`出力に失敗しました：${e.message || e}`, 'error');
+      }
     }
 
     // --- イベントバインド＆UIヘルパー ---
@@ -1232,7 +1676,7 @@
           const addVal = parseInt(btn.dataset.quickAdd, 10) || 0;
           const qtyInput = document.getElementById('qtyInput');
           const cur = parseInt(qtyInput.value, 10) || 0;
-          qtyInput.value = cur + addVal;
+          qtyInput.value = Math.max(0, cur + addVal);
         });
       });
 
@@ -1244,6 +1688,59 @@
         if (!activeBarcode) return;
         const item = itemsMap[activeBarcode];
         document.getElementById('qtyInput').value = item ? (Number(item.bookQty) || 0) : 0;
+      });
+
+      // ズーム
+      document.getElementById('zoomButtons').addEventListener('click', (e) => {
+        const b = e.target.closest('.zoom-btn');
+        if (!b) return;
+        applyZoom(Number(b.dataset.zoom) || 1);
+      });
+      applyZoom(currentZoom);
+
+      // 画面を離れたらカメラを止める（戻った時に映像が固まるのを防ぐ）
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden && isCameraRunning) stopCamera();
+      });
+
+      // ひも付け
+      document.getElementById('inputLinkSearch').addEventListener('input', renderLinkResults);
+      document.getElementById('linkResults').addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-link-code]');
+        if (!btn || !activeBarcode) return;
+        const alias = activeBarcode;
+        const target = btn.dataset.linkCode;
+        const item = itemsMap[target];
+        if (!item) return;
+        if (!confirm(`バーコード ${alias} を\n「${item.name}（${item.partNo || '-'}）」\nにひも付けますか？`)) return;
+        document.getElementById('inputLinkSearch').value = '';
+        document.getElementById('inputLinkSearch').blur();
+        linkAliasToItem(alias, target);
+      });
+      document.getElementById('aliasInfo').addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-unlink]');
+        if (!btn || !activeBarcode) return;
+        const item = itemsMap[activeBarcode];
+        if (!item) return;
+        const alias = btn.dataset.unlink;
+        if (!confirm(`${alias} のひも付けを解除しますか？`)) return;
+        item.aliases = (item.aliases || []).filter((a) => a !== alias);
+        saveLocalState(true);
+        fbRequest(`/${encodeURIComponent(fbKey(item.barcode))}/aliases`, 'PUT', item.aliases);
+        openActiveCard(item);
+      });
+
+      // 未カウントに戻す
+      document.getElementById('btnUncount').addEventListener('click', () => {
+        const item = itemsMap[activeBarcode];
+        if (!item) return;
+        if (!confirm(`「${item.name}」の数を全員分消して、未カウントに戻しますか？`)) return;
+        item.countsByStaff = {};
+        delete item.updatedAt;
+        saveLocalState(true);
+        fbRequest(`/${encodeURIComponent(fbKey(item.barcode))}/countsByStaff`, 'DELETE');
+        openActiveCard(item);
+        renderInventoryList();
       });
 
       document.getElementById('btnCommitAdd').addEventListener('click', () => commitCount('add'));
