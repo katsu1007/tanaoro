@@ -1,0 +1,1381 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>リアルタイム棚卸しスキャナ</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- SheetJS (Excel/CSV 読み書き用) -->
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
+  <!-- html5-qrcode (iOS/Android共通バーコードスキャン用) -->
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <!-- Google Fonts: Inter & Noto Sans JP -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;700;800&family=Noto+Sans+JP:wght@400;500;700;900&display=swap" rel="stylesheet">
+  <style>
+    body {
+      font-family: 'Inter', 'Noto Sans JP', sans-serif;
+      -webkit-tap-highlight-color: transparent;
+      overscroll-behavior-y: contain;
+    }
+    /* カメラプレビューの余分な枠線を調整 */
+    #qr-reader {
+      border: none !important;
+      width: 100% !important;
+    }
+    #qr-reader video {
+      object-fit: cover !important;
+      border-radius: 0.75rem;
+    }
+    /* 画面フラッシュ演出（iPhoneなどバイブ非対応端末の視覚フィードバック） */
+    @keyframes flashGreen {
+      0% { box-shadow: inset 0 0 0 8px rgba(34, 197, 94, 0.85); }
+      100% { box-shadow: inset 0 0 0 0 rgba(34, 197, 94, 0); }
+    }
+    @keyframes flashAmber {
+      0% { box-shadow: inset 0 0 0 8px rgba(245, 158, 11, 0.9); }
+      100% { box-shadow: inset 0 0 0 0 rgba(245, 158, 11, 0); }
+    }
+    .flash-match { animation: flashGreen 0.45s ease-out; }
+    .flash-warn { animation: flashAmber 0.55s ease-out; }
+  </style>
+</head>
+<body class="bg-slate-100 text-slate-900 min-h-screen pb-24">
+
+  <!-- 上部ナビゲーション・ステータスバー -->
+  <header class="bg-slate-900 text-white sticky top-0 z-30 shadow-md">
+    <div class="max-w-2xl mx-auto px-3 py-2.5 flex items-center justify-between gap-2">
+      <div class="flex items-center gap-2 min-w-0">
+        <div class="w-8 h-8 rounded-lg bg-emerald-500 flex items-center justify-center font-black text-slate-950 shrink-0">
+          棚
+        </div>
+        <div class="truncate">
+          <div class="flex items-center gap-1.5">
+            <span class="font-bold text-sm sm:text-base truncate">リアルタイム棚卸し</span>
+            <span id="syncBadge" class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 shrink-0">
+              ローカル/同一端末同期
+            </span>
+          </div>
+          <div class="text-[11px] text-slate-300 flex items-center gap-2">
+            <span>ルーム: <strong id="headerRoomId" class="text-white">0000</strong></span>
+            <span>担当: <strong id="headerStaffName" class="text-emerald-300">Aさん</strong></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-1.5 shrink-0">
+        <button id="btnOpenRoomModal" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-bold border border-slate-700 active:scale-95 transition">
+          👥 共有・設定
+        </button>
+        <button id="btnOpenImportModal" class="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-bold text-white active:scale-95 transition">
+          📂 取込/出力
+        </button>
+      </div>
+    </div>
+
+    <!-- リアルタイム更新ティッカー（誰が何を数えたか） -->
+    <div class="bg-slate-800/90 border-t border-slate-700/70 px-3 py-1 text-[11px] text-slate-300">
+      <div class="max-w-2xl mx-auto flex items-center justify-between gap-2">
+        <span class="truncate" id="liveActivityText">📡 待機中：Excelを読み込むかバーコードをスキャンしてください</span>
+        <span id="totalProgressMini" class="font-mono font-bold text-emerald-400 shrink-0">0 / 0 件</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-2xl mx-auto px-3 pt-3 space-y-3">
+
+    <!-- トースト通知エリア -->
+    <div id="toastBox" class="hidden fixed top-16 left-1/2 -translate-x-1/2 z-50 w-[92%] max-w-md px-4 py-3 rounded-xl shadow-xl font-bold text-sm text-white text-center transition-all"></div>
+
+    <!-- 1. カメラバーコードスキャナ ＋ ライト・音・バイブ操作 -->
+    <section class="bg-slate-900 text-white rounded-2xl p-3 shadow-sm">
+      <div class="flex items-center justify-between gap-2 mb-2">
+        <div class="flex items-center gap-2">
+          <button id="btnToggleCamera" class="px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs sm:text-sm flex items-center gap-1.5 shadow active:scale-95 transition">
+            <span id="camBtnIcon">📷</span>
+            <span id="camBtnLabel">カメラスキャン開始</span>
+          </button>
+          <button id="btnTorch" disabled class="px-3 py-2 rounded-xl bg-slate-800 text-slate-400 disabled:opacity-40 font-bold text-xs sm:text-sm border border-slate-700 flex items-center gap-1 active:scale-95 transition">
+            <span>🔦</span>
+            <span id="torchLabel">ライト</span>
+          </button>
+        </div>
+
+        <!-- 音・バイブ切替 -->
+        <div class="flex items-center gap-1.5">
+          <button id="btnToggleSound" class="p-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-bold text-emerald-300" title="効果音ON/OFF">
+            🔊 音ON
+          </button>
+          <button id="btnToggleVibe" class="p-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-bold text-emerald-300" title="バイブON/OFF">
+            📳 振動ON
+          </button>
+        </div>
+      </div>
+
+      <!-- カメラ映像コンテナ -->
+      <div id="cameraWrapper" class="hidden relative rounded-xl overflow-hidden bg-black aspect-[16/9] max-h-56">
+        <div id="qr-reader" class="w-full h-full"></div>
+        <!-- 中央照準ガイド（誤爆防止の目安） -->
+        <div class="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <div class="w-[82%] h-20 border-2 border-emerald-400/90 rounded-lg relative shadow-[0_0_0_9999px_rgba(0,0,0,0.38)]">
+            <div class="absolute top-1/2 left-2 right-2 h-0.5 bg-red-500/80"></div>
+            <span class="absolute -top-5 left-1 text-[10px] font-bold text-emerald-300 bg-black/60 px-1.5 py-0.5 rounded">
+              バーコードを赤線に合わせる
+            </span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 2. 商品名・品番・JAN 検索窓 -->
+    <section class="bg-white rounded-2xl p-3 shadow-sm border border-slate-200">
+      <div class="relative">
+        <span class="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 text-base">🔍</span>
+        <input
+          id="searchInput"
+          type="text"
+          placeholder="商品名・品番・自社コード・JANで検索..."
+          class="w-full pl-10 pr-20 py-3 rounded-xl bg-slate-100 border border-slate-200 focus:bg-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 outline-none text-base font-medium"
+        />
+        <button id="btnClearSearch" class="hidden absolute right-2.5 top-1/2 -translate-y-1/2 px-2.5 py-1 rounded-lg bg-slate-300 text-slate-700 text-xs font-bold">
+          クリア
+        </button>
+      </div>
+      <!-- 検索サジェスト（検索語入力時に即座に候補表示） -->
+      <div id="searchResultsDropdown" class="hidden mt-2 max-h-60 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-xl bg-white shadow-inner"></div>
+    </section>
+
+    <!-- 3. 照合＆実数手入力カード（選択中・スキャン直後の商品） -->
+    <section id="activeItemCard" class="bg-white rounded-2xl p-4 shadow-md border-2 border-emerald-500 transition-all">
+      <div id="emptyActiveState" class="text-center py-6 text-slate-400">
+        <div class="text-3xl mb-1">📦</div>
+        <p class="text-sm font-bold text-slate-600">バーコードをスキャン、または上の検索窓から商品を選択</p>
+        <p class="text-xs mt-1">ここに「現状在庫（現品数）」が表示され、実数を手入力できます</p>
+      </div>
+
+      <div id="activeItemBody" class="hidden space-y-3">
+        <!-- 商品ヘッダ情報 -->
+        <div class="flex items-start justify-between gap-2">
+          <div class="min-w-0">
+            <div class="flex flex-wrap items-center gap-1.5 mb-1">
+              <span id="actBarcode" class="font-mono text-xs font-bold px-2 py-0.5 rounded bg-slate-800 text-white">4900000000000</span>
+              <span id="actPartNo" class="text-xs font-bold px-2 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200">品番: -</span>
+              <span id="actInternalCode" class="text-xs px-2 py-0.5 rounded bg-slate-100 text-slate-500">自社: -</span>
+              <span id="actUnregisteredBadge" class="hidden text-xs font-bold px-2 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-300">マスタ未登録</span>
+            </div>
+            <h2 id="actName" class="text-base sm:text-lg font-black text-slate-900 leading-snug break-words">商品名がここに入ります</h2>
+          </div>
+          <button id="btnCloseActive" class="text-slate-400 hover:text-slate-600 p-1 text-lg font-bold shrink-0" title="閉じる">✕</button>
+        </div>
+
+        <!-- 現状在庫 vs 実棚合計 vs 差異 の3カラム比較パネル -->
+        <div class="grid grid-cols-3 gap-2 text-center">
+          <!-- 現状在庫（現品数） -->
+          <div class="bg-slate-100 rounded-xl p-2.5 border border-slate-200">
+            <div class="text-[11px] font-bold text-slate-500">現状在庫(現品数)</div>
+            <div class="mt-0.5 flex items-baseline justify-center gap-1">
+              <span id="actBookQty" class="text-2xl sm:text-3xl font-black text-slate-900 font-mono">0</span>
+              <span id="actUnit1" class="text-xs font-bold text-slate-600">個</span>
+            </div>
+            <div id="actAvailableNote" class="text-[10px] text-slate-400 mt-0.5">有効在庫: 0</div>
+          </div>
+
+          <!-- 現在の実棚合計（全員分） -->
+          <div class="bg-emerald-50 rounded-xl p-2.5 border border-emerald-200">
+            <div class="text-[11px] font-bold text-emerald-700">実棚合計(全員)</div>
+            <div class="mt-0.5 flex items-baseline justify-center gap-1">
+              <span id="actActualQty" class="text-2xl sm:text-3xl font-black text-emerald-700 font-mono">0</span>
+              <span id="actUnit2" class="text-xs font-bold text-emerald-700">個</span>
+            </div>
+            <div id="actStaffBreakdown" class="text-[10px] text-emerald-700/80 truncate mt-0.5">未カウント</div>
+          </div>
+
+          <!-- 差異（実棚 - 現状在庫） -->
+          <div id="actDiffBox" class="bg-slate-100 rounded-xl p-2.5 border border-slate-200">
+            <div class="text-[11px] font-bold text-slate-500">差異(実棚-現状)</div>
+            <div class="mt-0.5 flex items-baseline justify-center gap-0.5">
+              <span id="actDiffQty" class="text-2xl sm:text-3xl font-black font-mono">0</span>
+            </div>
+            <div id="actDiffLabel" class="text-[10px] font-bold mt-0.5">未入力</div>
+          </div>
+        </div>
+
+        <!-- マスタ外商品だった場合の品名手入力欄 -->
+        <div id="unregisteredNameBox" class="hidden bg-amber-50 border border-amber-200 rounded-xl p-2.5">
+          <label class="block text-xs font-bold text-amber-900 mb-1">マスタに無いJANです（品名・メモを任意入力）</label>
+          <input id="inputNewItemName" type="text" placeholder="例：〇〇シート 端数分" class="w-full px-3 py-2 rounded-lg bg-white border border-amber-300 text-sm font-medium outline-none" />
+        </div>
+
+        <!-- 実数手入力フォーム -->
+        <div class="bg-slate-50 rounded-xl p-3 border border-slate-200 space-y-2.5">
+          <div class="flex items-center justify-between gap-2">
+            <label for="qtyInput" class="text-xs font-bold text-slate-700">
+              実数を入力（<span id="inputStaffLabel" class="text-emerald-700">Aさん</span>のカウント）
+            </label>
+            <div class="flex items-center gap-1">
+              <button type="button" data-quick-add="1" class="quick-add-btn px-2.5 py-1 rounded-lg bg-white border border-slate-300 text-xs font-extrabold text-slate-700 active:bg-slate-200">+1</button>
+              <button type="button" data-quick-add="5" class="quick-add-btn px-2.5 py-1 rounded-lg bg-white border border-slate-300 text-xs font-extrabold text-slate-700 active:bg-slate-200">+5</button>
+              <button type="button" data-quick-add="10" class="quick-add-btn px-2.5 py-1 rounded-lg bg-white border border-slate-300 text-xs font-extrabold text-slate-700 active:bg-slate-200">+10</button>
+              <button type="button" id="btnQtyClear" class="px-2.5 py-1 rounded-lg bg-slate-200 text-xs font-bold text-slate-600 active:bg-slate-300">クリア</button>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-2">
+            <input
+              id="qtyInput"
+              type="number"
+              inputmode="numeric"
+              pattern="[0-9]*"
+              min="0"
+              placeholder="0"
+              class="w-full px-4 py-3 rounded-xl bg-white border-2 border-slate-300 focus:border-emerald-500 outline-none text-2xl font-black font-mono text-right"
+            />
+            <button id="btnCopyBookQty" type="button" class="px-3 py-3 rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-800 text-xs font-bold shrink-0 leading-tight text-center">
+              現状数と<br>同じにする
+            </button>
+          </div>
+
+          <!-- 確定ボタン（分担加算 vs 全体上書き） -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+            <button id="btnCommitAdd" type="button" class="w-full py-3.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-sm sm:text-base shadow active:scale-[0.99] transition flex items-center justify-center gap-1.5">
+              <span>＋</span>
+              <span>この数量を加算して確定</span>
+            </button>
+            <button id="btnCommitOverwrite" type="button" class="w-full py-3 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs sm:text-sm active:scale-[0.99] transition">
+              実棚合計をこの数に上書き
+            </button>
+          </div>
+          <p class="text-[11px] text-slate-500 text-center">
+            ※3人で別々の棚を数えるときは緑の<strong>「加算して確定」</strong>を使うと合算されます
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4. 進捗サマリー＆フィルタ付き在庫一覧 -->
+    <section class="bg-white rounded-2xl p-3 shadow-sm border border-slate-200 space-y-3">
+      <!-- サマリーバッジ -->
+      <div class="grid grid-cols-4 gap-1.5 text-center">
+        <div class="bg-slate-50 rounded-xl p-2 border border-slate-200">
+          <div class="text-[10px] font-bold text-slate-500">全品目</div>
+          <div id="statTotal" class="text-base font-black font-mono text-slate-800">0</div>
+        </div>
+        <div class="bg-emerald-50 rounded-xl p-2 border border-emerald-200">
+          <div class="text-[10px] font-bold text-emerald-700">一致OK</div>
+          <div id="statMatched" class="text-base font-black font-mono text-emerald-700">0</div>
+        </div>
+        <div class="bg-amber-50 rounded-xl p-2 border border-amber-200">
+          <div class="text-[10px] font-bold text-amber-700">差異あり</div>
+          <div id="statDiff" class="text-base font-black font-mono text-amber-700">0</div>
+        </div>
+        <div class="bg-slate-50 rounded-xl p-2 border border-slate-200">
+          <div class="text-[10px] font-bold text-slate-500">未カウント</div>
+          <div id="statUncounted" class="text-base font-black font-mono text-slate-600">0</div>
+        </div>
+      </div>
+
+      <!-- フィルタタブ -->
+      <div class="flex items-center gap-1 overflow-x-auto pb-1 no-scrollbar" id="filterTabs">
+        <button data-filter="all" class="filter-tab px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-900 text-white shrink-0">すべて</button>
+        <button data-filter="uncounted" class="filter-tab px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-100 text-slate-600 shrink-0">未カウント</button>
+        <button data-filter="diff" class="filter-tab px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-100 text-slate-600 shrink-0">差異あり</button>
+        <button data-filter="matched" class="filter-tab px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-100 text-slate-600 shrink-0">一致済み</button>
+        <button data-filter="unregistered" class="filter-tab px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-100 text-slate-600 shrink-0">マスタ外</button>
+      </div>
+
+      <!-- 在庫リスト（最大100件ずつ表示して高速維持） -->
+      <div id="inventoryList" class="divide-y divide-slate-100 max-h-[460px] overflow-y-auto">
+        <div class="py-10 text-center text-xs text-slate-400">
+          右上の「📂 取込/出力」からExcelファイルを選択するか、サンプルデータを読み込んでください
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- モーダル1：Excel/CSV 取込・出力 -->
+  <div id="importExportModal" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-3">
+    <div class="bg-white w-full max-w-md rounded-2xl p-5 space-y-4 shadow-2xl">
+      <div class="flex items-center justify-between">
+        <h3 class="text-base font-black text-slate-900">📂 在庫データの取り込み・書き出し</h3>
+        <button id="btnCloseImportModal" class="text-slate-400 hover:text-slate-700 font-bold text-lg">✕</button>
+      </div>
+
+      <div class="space-y-2">
+        <label class="block text-xs font-bold text-slate-700">1. 現状在庫のExcel (.xlsx) または CSV を読み込む</label>
+        <input id="fileInput" type="file" accept=".xlsx,.xls,.csv" class="block w-full text-xs text-slate-600 file:mr-3 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-emerald-600 file:text-white hover:file:bg-emerald-500 cursor-pointer border border-slate-200 rounded-xl p-1.5" />
+        <p class="text-[11px] text-slate-500">
+          ※「in」シート（または先頭シート）の「バーコード」「品名」「品番」「現品数」「単位」などを自動認識します。
+        </p>
+      </div>
+
+      <div class="pt-1">
+        <button id="btnLoadDemoData" type="button" class="w-full py-2.5 px-4 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold border border-slate-300">
+          🧪 瀬戸在庫サンプルデータで動作を試す（6品目）
+        </button>
+      </div>
+
+      <hr class="border-slate-200" />
+
+      <div class="space-y-2">
+        <label class="block text-xs font-bold text-slate-700">2. 棚卸し結果をダウンロード（Excel / CSV）</label>
+        <div class="grid grid-cols-2 gap-2">
+          <button id="btnExportXlsx" type="button" class="py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold">
+            📊 Excel (.xlsx) 出力
+          </button>
+          <button id="btnExportCsv" type="button" class="py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold">
+            📄 CSV 出力
+          </button>
+        </div>
+      </div>
+
+      <div class="pt-2 border-t border-slate-100 flex justify-between items-center">
+        <button id="btnResetCountsOnly" type="button" class="text-xs font-bold text-amber-600 hover:underline">
+          カウント数だけリセット
+        </button>
+        <button id="btnClearAllData" type="button" class="text-xs font-bold text-red-600 hover:underline">
+          全データ消去
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- モーダル2：3人リアルタイム共有＆担当者設定 -->
+  <div id="roomModal" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-3">
+    <div class="bg-white w-full max-w-md rounded-2xl p-5 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto">
+      <div class="flex items-center justify-between">
+        <h3 class="text-base font-black text-slate-900">👥 メンバー設定・リアルタイム共有</h3>
+        <button id="btnCloseRoomModal" class="text-slate-400 hover:text-slate-700 font-bold text-lg">✕</button>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-xs font-bold text-slate-700 mb-1">あなたの名前</label>
+          <input id="inputStaffName" type="text" placeholder="例: Aさん" class="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm font-bold" />
+        </div>
+        <div>
+          <label class="block text-xs font-bold text-slate-700 mb-1">ルーム番号（4桁）</label>
+          <input id="inputRoomId" type="text" maxlength="8" placeholder="例: 4829" class="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm font-mono font-bold" />
+        </div>
+      </div>
+
+      <div class="bg-slate-50 rounded-xl p-3 border border-slate-200 space-y-2">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-bold text-slate-800">🌐 クラウドリアルタイム同期（Firebase）</span>
+          <span id="firebaseStatusBadge" class="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-200 text-slate-600">未接続（ローカルモード）</span>
+        </div>
+        <p class="text-[11px] text-slate-600 leading-relaxed">
+          3人のスマホ（iPhone / Android）間でリアルタイムに在庫数を共有するには、無料のFirebase Realtime Database URLを貼り付けて保存してください。全員同じURLとルーム番号を入れると即同期します。
+        </p>
+        <input
+          id="inputFirebaseUrl"
+          type="url"
+          placeholder="https://your-project-default-rtdb.firebaseio.com"
+          class="w-full px-3 py-2 rounded-lg bg-white border border-slate-300 text-xs font-mono"
+        />
+      </div>
+
+      <button id="btnSaveRoomSettings" type="button" class="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-sm shadow">
+        設定を保存して適用
+      </button>
+    </div>
+  </div>
+
+  <script>
+    /**
+     * =========================================================================
+     * リアルタイム棚卸し PWA コアロジック
+     * - Excel (SheetJS) 読み込み・書き出し
+     * - html5-qrcode + トーチ（ライト）+ Web Audio API 効果音 + バイブレーション
+     * - 現状在庫（現品数）照合 ＋ 分担加算 / 上書き手入力
+     * - BroadcastChannel（同一ブラウザ/複数タブ）＆ Firebase REST/SSE リアルタイム同期対応
+     * =========================================================================
+     */
+
+    // --- アプリ状態管理 ---
+    const STATE_KEY = 'janscan_realtime_state_v1';
+    const SETTINGS_KEY = 'janscan_realtime_settings_v1';
+
+    let settings = {
+      staffName: 'Aさん',
+      roomId: '1234',
+      firebaseUrl: '',
+      soundEnabled: true,
+      vibrateEnabled: true
+    };
+
+    // itemsMap: { [barcode]: { barcode, internalCode, name, partNo, bookQty, availableQty, unit, countsByStaff: { 'Aさん': 10 }, updatedAt, unregistered } }
+    let itemsMap = {};
+    let activeBarcode = null;
+    let currentFilter = 'all';
+    let html5QrCode = null;
+    let isCameraRunning = false;
+    let isTorchOn = false;
+    let lastScannedCode = '';
+    let lastScannedTime = 0;
+    let firebaseEventSource = null;
+
+    // 同一ブラウザ・複数タブ間での即時同期チャネル
+    const syncChannel = ('BroadcastChannel' in window) ? new BroadcastChannel('janscan_sync_channel') : null;
+
+    // --- 起動時初期化 ---
+    window.addEventListener('DOMContentLoaded', () => {
+      loadSettings();
+      loadLocalState();
+      bindEvents();
+      updateHeaderUI();
+      renderInventoryList();
+      connectRealtimeSync();
+    });
+
+    function loadSettings() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+        settings = { ...settings, ...saved };
+      } catch (e) {
+        console.warn('設定の読み込みに失敗:', e);
+      }
+      document.getElementById('inputStaffName').value = settings.staffName;
+      document.getElementById('inputRoomId').value = settings.roomId;
+      document.getElementById('inputFirebaseUrl').value = settings.firebaseUrl || '';
+      updateSoundVibeButtons();
+    }
+
+    function saveSettings() {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+      updateHeaderUI();
+      updateSoundVibeButtons();
+    }
+
+    function loadLocalState() {
+      try {
+        const key = `${STATE_KEY}_${settings.roomId}`;
+        const saved = JSON.parse(localStorage.getItem(key) || '{}');
+        if (saved && typeof saved === 'object') {
+          itemsMap = saved;
+        }
+      } catch (e) {
+        itemsMap = {};
+      }
+    }
+
+    function saveLocalState(broadcast = true) {
+      try {
+        const key = `${STATE_KEY}_${settings.roomId}`;
+        localStorage.setItem(key, JSON.stringify(itemsMap));
+        if (broadcast && syncChannel) {
+          syncChannel.postMessage({
+            type: 'STATE_UPDATED',
+            roomId: settings.roomId,
+            sender: settings.staffName,
+            itemsMap
+          });
+        }
+      } catch (e) {
+        console.error('ローカル保存エラー:', e);
+      }
+    }
+
+    // 他のタブからの更新を受信
+    if (syncChannel) {
+      syncChannel.onmessage = (event) => {
+        const msg = event.data;
+        if (msg && msg.type === 'STATE_UPDATED' && msg.roomId === settings.roomId) {
+          itemsMap = msg.itemsMap || {};
+          refreshAllViews();
+          setActivityTicker(`🔄 ${msg.sender} が在庫データを更新しました`);
+        }
+      };
+    }
+
+    // --- Firebase Realtime Database リアルタイム同期（URL設定時のみ有効） ---
+    function connectRealtimeSync() {
+      if (firebaseEventSource) {
+        firebaseEventSource.close();
+        firebaseEventSource = null;
+      }
+
+      const baseUrl = (settings.firebaseUrl || '').trim().replace(/\/+$/, '');
+      const syncBadge = document.getElementById('syncBadge');
+      const fbStatus = document.getElementById('firebaseStatusBadge');
+
+      if (!baseUrl) {
+        syncBadge.textContent = 'ローカル/同一端末同期';
+        syncBadge.className = 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 shrink-0';
+        fbStatus.textContent = '未接続（ローカルモード）';
+        fbStatus.className = 'text-[10px] font-bold px-2 py-0.5 rounded bg-slate-200 text-slate-600';
+        return;
+      }
+
+      const roomUrl = `${baseUrl}/rooms/${encodeURIComponent(settings.roomId)}/items.json`;
+
+      try {
+        // Server-Sent Events (SSE) でFirebaseのリアルタイム変更を購読
+        firebaseEventSource = new EventSource(roomUrl);
+
+        firebaseEventSource.addEventListener('put', (e) => {
+          const payload = JSON.parse(e.data);
+          if (payload.path === '/' && payload.data) {
+            itemsMap = payload.data;
+            saveLocalState(false);
+            refreshAllViews();
+          } else if (payload.path && payload.path.startsWith('/') && payload.data) {
+            const code = decodeURIComponent(payload.path.slice(1));
+            itemsMap[code] = payload.data;
+            saveLocalState(false);
+            refreshAllViews();
+          }
+        });
+
+        firebaseEventSource.addEventListener('patch', (e) => {
+          const payload = JSON.parse(e.data);
+          if (payload.path === '/' && payload.data) {
+            Object.assign(itemsMap, payload.data);
+            saveLocalState(false);
+            refreshAllViews();
+          }
+        });
+
+        firebaseEventSource.onopen = () => {
+          syncBadge.textContent = '🌐 リアルタイム共有中';
+          syncBadge.className = 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shrink-0';
+          fbStatus.textContent = '接続済み（リアルタイム同期中）';
+          fbStatus.className = 'text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800';
+        };
+
+        firebaseEventSource.onerror = () => {
+          syncBadge.textContent = '⚠️ 同期再接続中';
+          syncBadge.className = 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-500/20 text-red-300 border border-red-500/40 shrink-0';
+        };
+      } catch (err) {
+        console.error('Firebase SSE接続エラー:', err);
+      }
+    }
+
+    async function pushItemToFirebase(item, activityLogText) {
+      const baseUrl = (settings.firebaseUrl || '').trim().replace(/\/+$/, '');
+      if (!baseUrl) return;
+      const itemUrl = `${baseUrl}/rooms/${encodeURIComponent(settings.roomId)}/items/${encodeURIComponent(item.barcode)}.json`;
+      try {
+        await fetch(itemUrl, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(item)
+        });
+      } catch (e) {
+        console.warn('クラウド送信失敗（ローカルには保存済み）:', e);
+      }
+    }
+
+    async function pushAllItemsToFirebase() {
+      const baseUrl = (settings.firebaseUrl || '').trim().replace(/\/+$/, '');
+      if (!baseUrl) return;
+      const roomUrl = `${baseUrl}/rooms/${encodeURIComponent(settings.roomId)}/items.json`;
+      try {
+        await fetch(roomUrl, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(itemsMap)
+        });
+      } catch (e) {
+        console.warn('マスタ一括アップロード失敗:', e);
+      }
+    }
+
+    // --- 効果音（Web Audio API）＆ バイブレーション＆画面フラッシュ ---
+    let audioCtx = null;
+    function playFeedback(type) {
+      // 1. 視覚フラッシュ（iPhoneなどバイブ非対応でも確実に気づける）
+      document.body.classList.remove('flash-match', 'flash-warn');
+      void document.body.offsetWidth; // reflow
+      document.body.classList.add(type === 'match' ? 'flash-match' : 'flash-warn');
+
+      // 2. バイブレーション（Android Chrome等）
+      if (settings.vibrateEnabled && navigator.vibrate) {
+        if (type === 'match') {
+          navigator.vibrate(55);
+        } else {
+          navigator.vibrate([80, 60, 120]);
+        }
+      }
+
+      // 3. サウンド（Web Audio APIで遅延ゼロ生成）
+      if (!settings.soundEnabled) return;
+      try {
+        if (!audioCtx) {
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (audioCtx.state === 'suspended') {
+          audioCtx.resume();
+        }
+
+        const now = audioCtx.currentTime;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+
+        if (type === 'match') {
+          // 軽快な高音ビープ「ピッ！」
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(1320, now);
+          osc.frequency.setValueAtTime(1760, now + 0.05);
+          gain.gain.setValueAtTime(0.25, now);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+          osc.start(now);
+          osc.stop(now + 0.14);
+        } else {
+          // 注意喚起の低め2連音「ブブッ」
+          osc.type = 'triangle';
+          osc.frequency.setValueAtTime(420, now);
+          osc.frequency.setValueAtTime(340, now + 0.12);
+          gain.gain.setValueAtTime(0.3, now);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+          osc.start(now);
+          osc.stop(now + 0.26);
+        }
+      } catch (e) {
+        // 音声再生ブロック時は無視
+      }
+    }
+
+    // --- カメラバーコードスキャナ ＆ トーチ（ライト）制御 ---
+    async function toggleCamera() {
+      const wrapper = document.getElementById('cameraWrapper');
+      const label = document.getElementById('camBtnLabel');
+      const icon = document.getElementById('camBtnIcon');
+      const torchBtn = document.getElementById('btnTorch');
+
+      if (isCameraRunning && html5QrCode) {
+        try {
+          if (isTorchOn) await setTorch(false);
+          await html5QrCode.stop();
+          html5QrCode.clear();
+        } catch (e) {}
+        isCameraRunning = false;
+        wrapper.classList.add('hidden');
+        label.textContent = 'カメラスキャン開始';
+        icon.textContent = '📷';
+        torchBtn.disabled = true;
+        return;
+      }
+
+      wrapper.classList.remove('hidden');
+      label.textContent = 'カメラ停止';
+      icon.textContent = '⏹️';
+
+      try {
+        html5QrCode = new Html5Qrcode('qr-reader');
+        const config = {
+          fps: 12,
+          qrbox: { width: 260, height: 110 },
+          aspectRatio: 1.777,
+          formatsToSupport: [
+            Html5QrcodeSupportedFormats.EAN_13,
+            Html5QrcodeSupportedFormats.EAN_8,
+            Html5QrcodeSupportedFormats.CODE_128,
+            Html5QrcodeSupportedFormats.CODE_39,
+            Html5QrcodeSupportedFormats.UPC_A,
+            Html5QrcodeSupportedFormats.UPC_E,
+            Html5QrcodeSupportedFormats.QR_CODE
+          ]
+        };
+
+        await html5QrCode.start(
+          { facingMode: 'environment' },
+          config,
+          (decodedText) => handleBarcodeScanned(decodedText),
+          () => {} // スキャン未検出フレームは無視
+        );
+
+        isCameraRunning = true;
+        torchBtn.disabled = false;
+      } catch (err) {
+        showToast('カメラを起動できませんでした（HTTPS環境・カメラ権限をご確認ください）', 'error');
+        wrapper.classList.add('hidden');
+        label.textContent = 'カメラスキャン開始';
+        icon.textContent = '📷';
+        isCameraRunning = false;
+      }
+    }
+
+    async function setTorch(enable) {
+      const torchBtn = document.getElementById('btnTorch');
+      const torchLabel = document.getElementById('torchLabel');
+      try {
+        const videoEl = document.querySelector('#qr-reader video');
+        if (!videoEl || !videoEl.srcObject) {
+          showToast('カメラ起動中のみライトを使用できます', 'warn');
+          return;
+        }
+        const track = videoEl.srcObject.getVideoTracks()[0];
+        const capabilities = track.getCapabilities ? track.getCapabilities() : {};
+        if (!capabilities.torch) {
+          showToast('この端末のブラウザはライト制御に非対応です', 'warn');
+          return;
+        }
+        await track.applyConstraints({ advanced: [{ torch: enable }] });
+        isTorchOn = enable;
+        if (isTorchOn) {
+          torchBtn.className = 'px-3 py-2 rounded-xl bg-amber-400 text-slate-950 font-black text-xs sm:text-sm flex items-center gap-1 shadow active:scale-95 transition';
+          torchLabel.textContent = 'ライトON';
+        } else {
+          torchBtn.className = 'px-3 py-2 rounded-xl bg-slate-800 text-slate-200 font-bold text-xs sm:text-sm border border-slate-700 flex items-center gap-1 active:scale-95 transition';
+          torchLabel.textContent = 'ライト';
+        }
+      } catch (e) {
+        showToast('ライトの切り替えに失敗しました', 'warn');
+      }
+    }
+
+    // --- バーコード読取時の処理 ---
+    function handleBarcodeScanned(rawCode) {
+      const code = String(rawCode || '').trim();
+      if (!code) return;
+
+      // 同じバーコードの連続誤読防止（1.5秒クールダウン）
+      const now = Date.now();
+      if (code === lastScannedCode && (now - lastScannedTime) < 1500) {
+        return;
+      }
+      lastScannedCode = code;
+      lastScannedTime = now;
+
+      selectItemByBarcode(code, true);
+    }
+
+    function selectItemByBarcode(code, fromScanner = false) {
+      activeBarcode = code;
+      const existing = itemsMap[code];
+
+      if (existing) {
+        if (fromScanner) playFeedback('match');
+        openActiveCard(existing);
+      } else {
+        // マスタ未登録のJANコード
+        if (fromScanner) playFeedback('warn');
+        const tempItem = {
+          barcode: code,
+          internalCode: '',
+          name: '',
+          partNo: '',
+          bookQty: 0,
+          availableQty: 0,
+          unit: '個',
+          countsByStaff: {},
+          unregistered: true
+        };
+        openActiveCard(tempItem);
+      }
+
+      // 入力欄にフォーカスしてすぐ数字を打てるようにする
+      const qtyInput = document.getElementById('qtyInput');
+      qtyInput.value = '';
+      if (!fromScanner) {
+        setTimeout(() => qtyInput.focus(), 80);
+      }
+    }
+
+    // --- 照合カードの表示更新 ---
+    function getActualTotal(item) {
+      if (!item || !item.countsByStaff) return 0;
+      return Object.values(item.countsByStaff).reduce((sum, v) => sum + (Number(v) || 0), 0);
+    }
+
+    function openActiveCard(item) {
+      document.getElementById('emptyActiveState').classList.add('hidden');
+      document.getElementById('activeItemBody').classList.remove('hidden');
+
+      document.getElementById('actBarcode').textContent = item.barcode;
+      document.getElementById('actPartNo').textContent = `品番: ${item.partNo || '-'}`;
+      document.getElementById('actInternalCode').textContent = `自社: ${item.internalCode || '-'}`;
+      document.getElementById('actName').textContent = item.name || '（マスタ未登録商品）';
+
+      const unregBadge = document.getElementById('actUnregisteredBadge');
+      const unregBox = document.getElementById('unregisteredNameBox');
+      if (item.unregistered) {
+        unregBadge.classList.remove('hidden');
+        unregBox.classList.remove('hidden');
+        document.getElementById('inputNewItemName').value = item.name || '';
+      } else {
+        unregBadge.classList.add('hidden');
+        unregBox.classList.add('hidden');
+      }
+
+      const unit = item.unit || '個';
+      const bookQty = Number(item.bookQty) || 0;
+      const actualTotal = getActualTotal(item);
+      const hasCounted = item.countsByStaff && Object.keys(item.countsByStaff).length > 0;
+
+      document.getElementById('actBookQty').textContent = bookQty.toLocaleString();
+      document.getElementById('actUnit1').textContent = unit;
+      document.getElementById('actAvailableNote').textContent = `有効在庫: ${(Number(item.availableQty) || 0).toLocaleString()}`;
+
+      document.getElementById('actActualQty').textContent = actualTotal.toLocaleString();
+      document.getElementById('actUnit2').textContent = unit;
+
+      // 担当者別内訳（例: Aさん: 10 / Bさん: 5）
+      if (hasCounted) {
+        const breakdown = Object.entries(item.countsByStaff)
+          .filter(([, q]) => q > 0)
+          .map(([staff, q]) => `${staff}:${q}`)
+          .join(' / ');
+        document.getElementById('actStaffBreakdown').textContent = breakdown || '0';
+      } else {
+        document.getElementById('actStaffBreakdown').textContent = '未カウント';
+      }
+
+      // 差異表示
+      const diff = actualTotal - bookQty;
+      const diffBox = document.getElementById('actDiffBox');
+      const diffQtyEl = document.getElementById('actDiffQty');
+      const diffLabelEl = document.getElementById('actDiffLabel');
+
+      if (!hasCounted) {
+        diffBox.className = 'bg-slate-100 rounded-xl p-2.5 border border-slate-200';
+        diffQtyEl.className = 'text-2xl sm:text-3xl font-black font-mono text-slate-400';
+        diffQtyEl.textContent = '-';
+        diffLabelEl.className = 'text-[10px] font-bold text-slate-400 mt-0.5';
+        diffLabelEl.textContent = '未入力';
+      } else if (diff === 0) {
+        diffBox.className = 'bg-emerald-100 rounded-xl p-2.5 border border-emerald-300';
+        diffQtyEl.className = 'text-2xl sm:text-3xl font-black font-mono text-emerald-800';
+        diffQtyEl.textContent = '0';
+        diffLabelEl.className = 'text-[10px] font-black text-emerald-800 mt-0.5';
+        diffLabelEl.textContent = '✅ 一致OK';
+      } else if (diff < 0) {
+        diffBox.className = 'bg-blue-50 rounded-xl p-2.5 border border-blue-200';
+        diffQtyEl.className = 'text-2xl sm:text-3xl font-black font-mono text-blue-700';
+        diffQtyEl.textContent = diff.toLocaleString();
+        diffLabelEl.className = 'text-[10px] font-bold text-blue-700 mt-0.5';
+        diffLabelEl.textContent = '不足';
+      } else {
+        diffBox.className = 'bg-amber-100 rounded-xl p-2.5 border border-amber-300';
+        diffQtyEl.className = 'text-2xl sm:text-3xl font-black font-mono text-amber-800';
+        diffQtyEl.textContent = `+${diff.toLocaleString()}`;
+        diffLabelEl.className = 'text-[10px] font-black text-amber-800 mt-0.5';
+        diffLabelEl.textContent = '⚠️ 超過';
+      }
+
+      document.getElementById('inputStaffLabel').textContent = settings.staffName;
+      document.getElementById('activeItemCard').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    // --- 実数確定（加算 または 上書き） ---
+    function commitCount(mode) {
+      if (!activeBarcode) return;
+      const rawVal = document.getElementById('qtyInput').value;
+      const numVal = parseInt(rawVal, 10);
+
+      if (isNaN(numVal) || numVal < 0) {
+        showToast('0以上の数量を入力してください', 'warn');
+        return;
+      }
+
+      let item = itemsMap[activeBarcode];
+      if (!item) {
+        // マスタ未登録商品の新規登録
+        const customName = document.getElementById('inputNewItemName').value.trim();
+        item = {
+          barcode: activeBarcode,
+          internalCode: '',
+          name: customName || `未登録商品 (${activeBarcode})`,
+          partNo: '',
+          bookQty: 0,
+          availableQty: 0,
+          unit: '個',
+          countsByStaff: {},
+          unregistered: true
+        };
+      } else if (item.unregistered) {
+        const customName = document.getElementById('inputNewItemName').value.trim();
+        if (customName) item.name = customName;
+      }
+
+      if (!item.countsByStaff) item.countsByStaff = {};
+
+      if (mode === 'add') {
+        const prev = Number(item.countsByStaff[settings.staffName]) || 0;
+        item.countsByStaff[settings.staffName] = prev + numVal;
+      } else {
+        // 上書きモード：他の人の内訳をリセットし、現在の担当者の値で合計を統一
+        item.countsByStaff = { [settings.staffName]: numVal };
+      }
+
+      item.updatedAt = new Date().toISOString();
+      item.lastUpdatedBy = settings.staffName;
+      itemsMap[activeBarcode] = item;
+
+      const totalAfter = getActualTotal(item);
+      const diffAfter = totalAfter - (Number(item.bookQty) || 0);
+
+      // 現状在庫を超えた場合は警告音でお知らせ
+      if (!item.unregistered && diffAfter > 0) {
+        playFeedback('warn');
+        showToast(`⚠️ 現状在庫(${item.bookQty})を +${diffAfter} 超過しました`, 'warn');
+      } else {
+        playFeedback('match');
+        showToast(`✅ ${item.name}：実棚 ${totalAfter} ${item.unit || '個'} で確定`, 'success');
+      }
+
+      saveLocalState(true);
+      pushItemToFirebase(item);
+
+      const logMsg = `📝 ${settings.staffName}：「${item.name}」を ${mode === 'add' ? `+${numVal}` : `=${numVal}`}（合計 ${totalAfter}）`;
+      setActivityTicker(logMsg);
+
+      document.getElementById('qtyInput').value = '';
+      openActiveCard(item);
+      renderInventoryList();
+    }
+
+    // --- 商品名・品番・バーコード検索（全角半角・空白ゆらぎ吸収） ---
+    function normalizeText(str) {
+      return String(str || '')
+        .normalize('NFKC')
+        .toLowerCase()
+        .replace(/\s+/g, '');
+    }
+
+    function handleSearchInput() {
+      const queryRaw = document.getElementById('searchInput').value;
+      const clearBtn = document.getElementById('btnClearSearch');
+      const dropdown = document.getElementById('searchResultsDropdown');
+
+      if (!queryRaw.trim()) {
+        clearBtn.classList.add('hidden');
+        dropdown.classList.add('hidden');
+        dropdown.innerHTML = '';
+        return;
+      }
+
+      clearBtn.classList.remove('hidden');
+      const tokens = queryRaw.trim().split(/\s+/).map(normalizeText).filter(Boolean);
+
+      const matches = Object.values(itemsMap).filter((item) => {
+        const target = normalizeText(`${item.name} ${item.partNo} ${item.internalCode} ${item.barcode}`);
+        return tokens.every((t) => target.includes(t));
+      }).slice(0, 30);
+
+      dropdown.classList.remove('hidden');
+      if (matches.length === 0) {
+        dropdown.innerHTML = `<div class="p-3 text-xs text-slate-400 text-center">一致する商品が見つかりません</div>`;
+        return;
+      }
+
+      dropdown.innerHTML = matches.map((item) => {
+        const actual = getActualTotal(item);
+        return `
+          <button type="button" data-select-code="${escapeHtml(item.barcode)}" class="w-full text-left px-3 py-2.5 hover:bg-emerald-50 active:bg-emerald-100 flex items-center justify-between gap-2">
+            <div class="min-w-0">
+              <div class="text-xs font-bold text-slate-900 truncate">${escapeHtml(item.name)}</div>
+              <div class="text-[11px] text-slate-500 font-mono">
+                ${escapeHtml(item.barcode)} ${item.partNo ? `/ 品番:${escapeHtml(item.partNo)}` : ''}
+              </div>
+            </div>
+            <div class="text-right shrink-0">
+              <div class="text-xs font-black text-slate-800">現状: ${item.bookQty}${escapeHtml(item.unit || '')}</div>
+              <div class="text-[11px] font-bold text-emerald-700">実棚: ${actual}</div>
+            </div>
+          </button>
+        `;
+      }).join('');
+    }
+
+    // --- 在庫一覧＆サマリー描画 ---
+    function refreshAllViews() {
+      if (activeBarcode && itemsMap[activeBarcode]) {
+        openActiveCard(itemsMap[activeBarcode]);
+      }
+      renderInventoryList();
+    }
+
+    function renderInventoryList() {
+      const allItems = Object.values(itemsMap);
+      let matchedCount = 0;
+      let diffCount = 0;
+      let uncountedCount = 0;
+
+      allItems.forEach((item) => {
+        const hasCounted = item.countsByStaff && Object.keys(item.countsByStaff).length > 0;
+        const actual = getActualTotal(item);
+        const book = Number(item.bookQty) || 0;
+        if (!hasCounted) {
+          uncountedCount++;
+        } else if (actual === book) {
+          matchedCount++;
+        } else {
+          diffCount++;
+        }
+      });
+
+      document.getElementById('statTotal').textContent = allItems.length;
+      document.getElementById('statMatched').textContent = matchedCount;
+      document.getElementById('statDiff').textContent = diffCount;
+      document.getElementById('statUncounted').textContent = uncountedCount;
+      document.getElementById('totalProgressMini').textContent = `${allItems.length - uncountedCount} / ${allItems.length} 件`;
+
+      const filtered = allItems.filter((item) => {
+        const hasCounted = item.countsByStaff && Object.keys(item.countsByStaff).length > 0;
+        const actual = getActualTotal(item);
+        const book = Number(item.bookQty) || 0;
+        if (currentFilter === 'uncounted') return !hasCounted;
+        if (currentFilter === 'matched') return hasCounted && actual === book;
+        if (currentFilter === 'diff') return hasCounted && actual !== book;
+        if (currentFilter === 'unregistered') return Boolean(item.unregistered);
+        return true;
+      });
+
+      const listEl = document.getElementById('inventoryList');
+      if (filtered.length === 0) {
+        listEl.innerHTML = `<div class="py-10 text-center text-xs text-slate-400">該当する商品データがありません</div>`;
+        return;
+      }
+
+      // 描画パフォーマンス維持のため最大150件表示
+      const displaySlice = filtered.slice(0, 150);
+      listEl.innerHTML = displaySlice.map((item) => {
+        const hasCounted = item.countsByStaff && Object.keys(item.countsByStaff).length > 0;
+        const actual = getActualTotal(item);
+        const book = Number(item.bookQty) || 0;
+        const diff = actual - book;
+
+        let statusBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-500">未</span>`;
+        if (hasCounted) {
+          if (diff === 0) {
+            statusBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-black bg-emerald-100 text-emerald-800">一致</span>`;
+          } else if (diff < 0) {
+            statusBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-black bg-blue-100 text-blue-800">${diff}</span>`;
+          } else {
+            statusBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-black bg-amber-100 text-amber-800">+${diff}</span>`;
+          }
+        }
+
+        return `
+          <button type="button" data-select-code="${escapeHtml(item.barcode)}" class="w-full text-left py-2.5 px-2 hover:bg-slate-50 active:bg-emerald-50 flex items-center justify-between gap-2">
+            <div class="min-w-0">
+              <div class="flex items-center gap-1.5">
+                ${statusBadge}
+                <span class="text-xs font-bold text-slate-900 truncate">${escapeHtml(item.name)}</span>
+              </div>
+              <div class="text-[11px] text-slate-400 font-mono mt-0.5 truncate">
+                ${escapeHtml(item.barcode)} ${item.partNo ? `・品番:${escapeHtml(item.partNo)}` : ''}
+              </div>
+            </div>
+            <div class="text-right shrink-0 font-mono">
+              <div class="text-xs font-black ${hasCounted ? 'text-emerald-700' : 'text-slate-400'}">
+                実:${actual} <span class="text-[10px] font-normal text-slate-500">/ 現:${book}${escapeHtml(item.unit || '')}</span>
+              </div>
+            </div>
+          </button>
+        `;
+      }).join('') + (filtered.length > 150 ? `<div class="py-3 text-center text-[11px] text-slate-400">他 ${filtered.length - 150} 件は上の検索窓から絞り込めます</div>` : '');
+    }
+
+    // --- Excel / CSV 読み込み（瀬戸在庫Excelフォーマット完全対応） ---
+    function handleFileUpload(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const data = new Uint8Array(e.target.result);
+          const workbook = XLSX.read(data, { type: 'array' });
+          // 'in' シートがあれば優先、なければ先頭シート
+          const targetSheetName = workbook.SheetNames.includes('in') ? 'in' : workbook.SheetNames[0];
+          const sheet = workbook.Sheets[targetSheetName];
+          const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+
+          if (!rows || rows.length === 0) {
+            showToast('シートにデータが見つかりませんでした', 'error');
+            return;
+          }
+
+          let importedCount = 0;
+          rows.forEach((row) => {
+            // 列名のゆらぎに対応（瀬戸在庫シート: バーコード, 自社コード, 品名, 品番, 現品数, 有効在庫数, 単位）
+            const barcode = String(row['バーコード'] || row['JAN'] || row['JANコード'] || '').trim();
+            if (!barcode) return;
+
+            const existing = itemsMap[barcode];
+            itemsMap[barcode] = {
+              barcode,
+              internalCode: String(row['自社コード'] || '').trim(),
+              name: String(row['品名'] || row['商品名'] || '名称未設定').trim(),
+              partNo: String(row['品番'] || '').trim(),
+              bookQty: Number(row['現品数'] ?? row['現状在庫'] ?? row['理論在庫'] ?? 0) || 0,
+              availableQty: Number(row['有効在庫数'] ?? 0) || 0,
+              unit: String(row['単位'] || '個').trim(),
+              // すでにカウント中のデータがあれば引き継ぐ
+              countsByStaff: existing ? (existing.countsByStaff || {}) : {},
+              unregistered: false
+            };
+            importedCount++;
+          });
+
+          saveLocalState(true);
+          pushAllItemsToFirebase();
+          renderInventoryList();
+          document.getElementById('importExportModal').classList.add('hidden');
+          showToast(`✅ ${importedCount} 件の在庫マスタを読み込みました！`, 'success');
+          setActivityTicker(`📂 ${settings.staffName} が ${importedCount}件の在庫マスタを読み込みました`);
+        } catch (err) {
+          console.error(err);
+          showToast('ファイルの読み込みに失敗しました', 'error');
+        }
+      };
+      reader.readAsArrayBuffer(file);
+      event.target.value = '';
+    }
+
+    function loadDemoData() {
+      const demos = [
+        { barcode: '4963427260322', internalCode: '11220', name: 'ｽﾊﾟｯﾀｼｰﾄﾃﾞﾗｯｸｽ 03SDX 4号 1920*1920', partNo: '03SDX-4', bookQty: 59, availableQty: 59, unit: '枚' },
+        { barcode: '4963427260346', internalCode: '11222', name: 'ｽﾊﾟｯﾀｼｰﾄﾃﾞﾗｯｸｽ 03SDX 6号 1920*2920', partNo: '03SDX-6', bookQty: 27, availableQty: 27, unit: '枚' },
+        { barcode: '4977292115018', internalCode: '20410', name: 'SK11 ｶｯﾀｰﾅｲﾌ ｵｰﾄﾛｯｸ L型', partNo: 'LC-500', bookQty: 140, availableQty: 138, unit: '本' },
+        { barcode: '4901480130125', internalCode: '30105', name: 'ｺｸﾖ ﾌﾗｯﾄﾌｧｲﾙV A4縦 10冊ﾊﾟｯｸ 青', partNo: 'ﾌ-V10-3B', bookQty: 35, availableQty: 35, unit: 'ﾊﾟｯｸ' },
+        { barcode: '4989999123456', internalCode: '40880', name: 'TRUSCO ﾌﾟﾗｽﾁｯｸﾊﾞｹﾂ 15L ﾌﾞﾙｰ', partNo: 'TPB-15-B', bookQty: 12, availableQty: 12, unit: '個' },
+        { barcode: '4547441901238', internalCode: '50912', name: 'ﾊﾟﾅｿﾆｯｸ ｱﾙｶﾘ乾電池 単3形 20本入', partNo: 'LR6XJ/20SW', bookQty: 48, availableQty: 48, unit: '箱' }
+      ];
+      demos.forEach((d) => {
+        itemsMap[d.barcode] = { ...d, countsByStaff: {}, unregistered: false };
+      });
+      saveLocalState(true);
+      pushAllItemsToFirebase();
+      renderInventoryList();
+      document.getElementById('importExportModal').classList.add('hidden');
+      showToast('🧪 サンプルデータ（6品目）を読み込みました', 'success');
+    }
+
+    // --- Excel / CSV 書き出し ---
+    function exportData(format) {
+      const list = Object.values(itemsMap);
+      if (list.length === 0) {
+        showToast('出力するデータがありません', 'warn');
+        return;
+      }
+
+      const exportRows = list.map((item) => {
+        const actual = getActualTotal(item);
+        const book = Number(item.bookQty) || 0;
+        const hasCounted = item.countsByStaff && Object.keys(item.countsByStaff).length > 0;
+        const breakdown = hasCounted
+          ? Object.entries(item.countsByStaff).map(([k, v]) => `${k}:${v}`).join(' / ')
+          : '';
+
+        return {
+          'バーコード': item.barcode,
+          '自社コード': item.internalCode || '',
+          '品名': item.name,
+          '品番': item.partNo || '',
+          '現品数(現状)': book,
+          '実棚数': hasCounted ? actual : '',
+          '差異': hasCounted ? (actual - book) : '',
+          '単位': item.unit || '',
+          '有効在庫数': item.availableQty || 0,
+          '担当者内訳': breakdown,
+          '区分': item.unregistered ? 'マスタ外' : 'マスタ一致',
+          '最終更新': item.updatedAt ? new Date(item.updatedAt).toLocaleString('ja-JP') : ''
+        };
+      });
+
+      const ws = XLSX.utils.json_to_sheet(exportRows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, '棚卸し結果');
+
+      const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      const filename = `棚卸し結果_ルーム${settings.roomId}_${dateStr}.${format}`;
+      XLSX.writeFile(wb, filename);
+      showToast(`📥 ${filename} を出力しました`, 'success');
+    }
+
+    // --- イベントバインド＆UIヘルパー ---
+    function bindEvents() {
+      document.getElementById('btnToggleCamera').addEventListener('click', toggleCamera);
+      document.getElementById('btnTorch').addEventListener('click', () => setTorch(!isTorchOn));
+
+      document.getElementById('btnToggleSound').addEventListener('click', () => {
+        settings.soundEnabled = !settings.soundEnabled;
+        saveSettings();
+      });
+      document.getElementById('btnToggleVibe').addEventListener('click', () => {
+        settings.vibrateEnabled = !settings.vibrateEnabled;
+        saveSettings();
+      });
+
+      // 検索窓
+      const searchInput = document.getElementById('searchInput');
+      searchInput.addEventListener('input', handleSearchInput);
+      document.getElementById('btnClearSearch').addEventListener('click', () => {
+        searchInput.value = '';
+        handleSearchInput();
+      });
+
+      // 検索ドロップダウン＆一覧のアイテム選択（イベント委譲）
+      document.getElementById('searchResultsDropdown').addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-select-code]');
+        if (!btn) return;
+        selectItemByBarcode(btn.dataset.selectCode, false);
+        document.getElementById('searchResultsDropdown').classList.add('hidden');
+      });
+
+      document.getElementById('inventoryList').addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-select-code]');
+        if (!btn) return;
+        selectItemByBarcode(btn.dataset.selectCode, false);
+      });
+
+      // クイック加算ボタン (+1, +5, +10)
+      document.querySelectorAll('.quick-add-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const addVal = parseInt(btn.dataset.quickAdd, 10) || 0;
+          const qtyInput = document.getElementById('qtyInput');
+          const cur = parseInt(qtyInput.value, 10) || 0;
+          qtyInput.value = cur + addVal;
+        });
+      });
+
+      document.getElementById('btnQtyClear').addEventListener('click', () => {
+        document.getElementById('qtyInput').value = '';
+      });
+
+      document.getElementById('btnCopyBookQty').addEventListener('click', () => {
+        if (!activeBarcode) return;
+        const item = itemsMap[activeBarcode];
+        document.getElementById('qtyInput').value = item ? (Number(item.bookQty) || 0) : 0;
+      });
+
+      document.getElementById('btnCommitAdd').addEventListener('click', () => commitCount('add'));
+      document.getElementById('btnCommitOverwrite').addEventListener('click', () => commitCount('overwrite'));
+
+      document.getElementById('btnCloseActive').addEventListener('click', () => {
+        activeBarcode = null;
+        document.getElementById('activeItemBody').classList.add('hidden');
+        document.getElementById('emptyActiveState').classList.remove('hidden');
+      });
+
+      // フィルタタブ
+      document.getElementById('filterTabs').addEventListener('click', (e) => {
+        const tab = e.target.closest('.filter-tab');
+        if (!tab) return;
+        currentFilter = tab.dataset.filter;
+        document.querySelectorAll('.filter-tab').forEach((t) => {
+          t.className = 'filter-tab px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-100 text-slate-600 shrink-0';
+        });
+        tab.className = 'filter-tab px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-900 text-white shrink-0';
+        renderInventoryList();
+      });
+
+      // 取込/出力モーダル
+      document.getElementById('btnOpenImportModal').addEventListener('click', () => {
+        document.getElementById('importExportModal').classList.remove('hidden');
+      });
+      document.getElementById('btnCloseImportModal').addEventListener('click', () => {
+        document.getElementById('importExportModal').classList.add('hidden');
+      });
+      document.getElementById('fileInput').addEventListener('change', handleFileUpload);
+      document.getElementById('btnLoadDemoData').addEventListener('click', loadDemoData);
+      document.getElementById('btnExportXlsx').addEventListener('click', () => exportData('xlsx'));
+      document.getElementById('btnExportCsv').addEventListener('click', () => exportData('csv'));
+
+      document.getElementById('btnResetCountsOnly').addEventListener('click', () => {
+        Object.values(itemsMap).forEach((item) => {
+          item.countsByStaff = {};
+          delete item.updatedAt;
+        });
+        saveLocalState(true);
+        pushAllItemsToFirebase();
+        refreshAllViews();
+        document.getElementById('importExportModal').classList.add('hidden');
+        showToast('カウント数をすべてリセットしました', 'warn');
+      });
+
+      document.getElementById('btnClearAllData').addEventListener('click', () => {
+        itemsMap = {};
+        activeBarcode = null;
+        saveLocalState(true);
+        pushAllItemsToFirebase();
+        document.getElementById('activeItemBody').classList.add('hidden');
+        document.getElementById('emptyActiveState').classList.remove('hidden');
+        renderInventoryList();
+        document.getElementById('importExportModal').classList.add('hidden');
+        showToast('全データを消去しました', 'warn');
+      });
+
+      // 共有・設定モーダル
+      document.getElementById('btnOpenRoomModal').addEventListener('click', () => {
+        document.getElementById('roomModal').classList.remove('hidden');
+      });
+      document.getElementById('btnCloseRoomModal').addEventListener('click', () => {
+        document.getElementById('roomModal').classList.add('hidden');
+      });
+      document.getElementById('btnSaveRoomSettings').addEventListener('click', () => {
+        const name = document.getElementById('inputStaffName').value.trim() || '担当者';
+        const room = document.getElementById('inputRoomId').value.trim() || '1234';
+        const fbUrl = document.getElementById('inputFirebaseUrl').value.trim();
+
+        const roomChanged = room !== settings.roomId;
+        settings.staffName = name;
+        settings.roomId = room;
+        settings.firebaseUrl = fbUrl;
+        saveSettings();
+
+        if (roomChanged) {
+          loadLocalState();
+          activeBarcode = null;
+          document.getElementById('activeItemBody').classList.add('hidden');
+          document.getElementById('emptyActiveState').classList.remove('hidden');
+          renderInventoryList();
+        }
+        connectRealtimeSync();
+        document.getElementById('roomModal').classList.add('hidden');
+        showToast(`👥 ${name}（ルーム ${room}）で設定を保存しました`, 'success');
+      });
+    }
+
+    function updateHeaderUI() {
+      document.getElementById('headerRoomId').textContent = settings.roomId;
+      document.getElementById('headerStaffName').textContent = settings.staffName;
+      document.getElementById('inputStaffLabel').textContent = settings.staffName;
+    }
+
+    function updateSoundVibeButtons() {
+      const sBtn = document.getElementById('btnToggleSound');
+      const vBtn = document.getElementById('btnToggleVibe');
+      sBtn.textContent = settings.soundEnabled ? '🔊 音ON' : '🔇 音OFF';
+      sBtn.className = settings.soundEnabled
+        ? 'p-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-bold text-emerald-300'
+        : 'p-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-bold text-slate-500';
+      vBtn.textContent = settings.vibrateEnabled ? '📳 振動ON' : '📴 振動OFF';
+      vBtn.className = settings.vibrateEnabled
+        ? 'p-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-bold text-emerald-300'
+        : 'p-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-bold text-slate-500';
+    }
+
+    function setActivityTicker(text) {
+      document.getElementById('liveActivityText').textContent = text;
+    }
+
+    let toastTimer = null;
+    function showToast(msg, type = 'success') {
+      const box = document.getElementById('toastBox');
+      box.textContent = msg;
+      box.className = 'fixed top-16 left-1/2 -translate-x-1/2 z-50 w-[92%] max-w-md px-4 py-3 rounded-xl shadow-xl font-bold text-sm text-white text-center transition-all ' +
+        (type === 'error' ? 'bg-red-600' : type === 'warn' ? 'bg-amber-600' : 'bg-emerald-600');
+      box.classList.remove('hidden');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => box.classList.add('hidden'), 2600);
+    }
+
+    function escapeHtml(str) {
+      return String(str || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+  </script>
+</body>
+</html>
